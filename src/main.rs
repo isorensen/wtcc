@@ -23,7 +23,61 @@ use wtcc::ui;
 
 const POLL: Duration = Duration::from_millis(16);
 
+/// Parsed result of the command-line arguments. Kept pure (no I/O) so it is
+/// unit-testable without process exit.
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    Run,
+    Version,
+    Help,
+    Unknown(String),
+}
+
+/// Classify the CLI arguments. Skips argv[0] (the binary name).
+fn parse_args(mut args: impl Iterator<Item = String>) -> Cli {
+    // Skip the binary name.
+    args.next();
+    match args.next().as_deref() {
+        None => Cli::Run,
+        Some("--version" | "-V") => Cli::Version,
+        Some("--help" | "-h") => Cli::Help,
+        Some(flag) if flag.starts_with('-') => Cli::Unknown(flag.to_string()),
+        Some(_) => Cli::Run,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    match parse_args(std::env::args()) {
+        Cli::Version => {
+            println!("wtcc {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Help => {
+            println!(
+                "wtcc {} — WorkTree Command Center\n\
+                \n\
+                A full-screen TUI for orchestrating Claude Code agents across git worktrees.\n\
+                There are no subcommands; wtcc opens the interface directly.\n\
+                \n\
+                Runtime requirements:\n\
+                  git    required\n\
+                  tmux   required\n\
+                  gh     optional (PR/CI status badges)\n\
+                  claude optional (agent pane)\n\
+                \n\
+                Press ? inside wtcc to see keybindings.",
+                env!("CARGO_PKG_VERSION"),
+            );
+            return Ok(());
+        }
+        Cli::Unknown(flag) => {
+            eprintln!("error: unknown option `{flag}`");
+            eprintln!("Usage: wtcc [--version | --help]");
+            std::process::exit(2);
+        }
+        Cli::Run => {}
+    }
+
     install_panic_hook();
 
     let config = Config::load().context("failed to load config")?;
@@ -82,4 +136,41 @@ fn install_panic_hook() {
         restore_terminal().ok();
         default(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> impl Iterator<Item = String> {
+        v.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn parse_args_no_args_is_run() {
+        assert_eq!(parse_args(args(&["wtcc"])), Cli::Run);
+    }
+
+    #[test]
+    fn parse_args_version_flags() {
+        assert_eq!(parse_args(args(&["wtcc", "--version"])), Cli::Version);
+        assert_eq!(parse_args(args(&["wtcc", "-V"])), Cli::Version);
+    }
+
+    #[test]
+    fn parse_args_help_flags() {
+        assert_eq!(parse_args(args(&["wtcc", "--help"])), Cli::Help);
+        assert_eq!(parse_args(args(&["wtcc", "-h"])), Cli::Help);
+    }
+
+    #[test]
+    fn parse_args_unknown_flag() {
+        assert_eq!(
+            parse_args(args(&["wtcc", "--bogus"])),
+            Cli::Unknown("--bogus".to_string())
+        );
+    }
 }

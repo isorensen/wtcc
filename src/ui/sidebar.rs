@@ -44,7 +44,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     }
 
     if app.config.repos.is_empty() {
-        items.push(ListItem::new(Line::from("(no repos registered)")));
+        items.push(ListItem::new(Line::from("  press a to register a repo")));
     }
 
     List::new(items).block(block).render(area, buf);
