@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Widget};
 
 use crate::app::{App, Focus};
+use crate::session::ActivityState;
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let focused = app.focus == Focus::Sidebar;
@@ -72,7 +73,8 @@ fn worktree_line<'a>(
     }
 
     let mut spans = vec![
-        Span::raw("    "),
+        Span::raw("  "),
+        activity_span(app.worktree_activity(&wt.branch)),
         Span::raw(format!("{glyph} ")),
         Span::styled(label, style),
     ];
@@ -90,6 +92,18 @@ fn worktree_line<'a>(
     }
 
     Line::from(spans)
+}
+
+/// A single-column glyph for the agent's activity, occupying a fixed width so
+/// the selected/branch columns stay aligned regardless of state. `None` renders
+/// a blank cell. Diamonds are used (not dots) so the activity marker is not
+/// confused with the adjacent selection marker (`●`/`○`).
+fn activity_span<'a>(state: ActivityState) -> Span<'a> {
+    match state {
+        ActivityState::Working => Span::styled("◆", Style::default().add_modifier(Modifier::BOLD)),
+        ActivityState::Idle => Span::styled("◇", Style::default().add_modifier(Modifier::DIM)),
+        ActivityState::None => Span::raw(" "),
+    }
 }
 
 fn short_path(path: &std::path::Path) -> String {
