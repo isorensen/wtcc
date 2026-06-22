@@ -13,6 +13,7 @@ pub const HELP_SIDEBAR: &[(&str, &str)] = &[
     ("D", "unregister repo"),
     ("n", "add worktree"),
     ("d", "remove worktree"),
+    ("R", "restart agent"),
     ("r", "refresh"),
     (": / Ctrl-P", "command palette"),
     ("?", "help"),
@@ -120,6 +121,7 @@ fn handle_primary(app: &mut App, key: KeyEvent, ctrl: bool) {
         KeyCode::Char('n') => open_add_prompt(app),
         KeyCode::Char('d') => request_remove(app),
         KeyCode::Char('D') => request_remove_repo(app),
+        KeyCode::Char('R') => request_restart_agent(app),
         KeyCode::Char('?') => app.overlay = Overlay::Help,
         _ => {}
     }
@@ -192,6 +194,7 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
             match confirm {
                 Confirm::RemoveWorktree(path) => app.remove_worktree(&path),
                 Confirm::RemoveRepo(index) => app.remove_repository(index),
+                Confirm::RestartAgent(branch) => app.restart_agent(&branch),
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.overlay = Overlay::None,
@@ -238,12 +241,23 @@ fn request_remove_repo(app: &mut App) {
     }
 }
 
+fn request_restart_agent(app: &mut App) {
+    match app.current_worktree() {
+        Some(wt) => {
+            let branch = wt.branch.clone();
+            app.overlay = Overlay::Confirm(Confirm::RestartAgent(branch));
+        }
+        None => app.status = Some("no worktree selected".to_string()),
+    }
+}
+
 fn run_command(app: &mut App, cmd: Command) {
     match cmd {
         Command::AddRepo => open_register_prompt(app),
         Command::RemoveRepo => request_remove_repo(app),
         Command::AddWorktree => open_add_prompt(app),
         Command::RemoveWorktree => request_remove(app),
+        Command::RestartAgent => request_restart_agent(app),
         Command::SwitchRepo => app.cycle_repo(),
         Command::Refresh => app.refresh_worktrees(),
         Command::Quit => app.should_quit = true,
@@ -255,6 +269,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::repository::Repository;
+    use crate::session::SessionManager;
     use crate::worktree::Worktree;
     use std::path::PathBuf;
 
@@ -362,6 +377,39 @@ mod tests {
         ));
         handle_key(&mut a, key(KeyCode::Char('n')));
         assert_eq!(a.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn shift_r_requests_restart_agent_confirm() {
+        let mut a = app();
+        handle_key(&mut a, key(KeyCode::Char('R')));
+        assert!(matches!(
+            a.overlay,
+            Overlay::Confirm(Confirm::RestartAgent(ref b)) if b == "main"
+        ));
+        handle_key(&mut a, key(KeyCode::Char('n')));
+        assert_eq!(a.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn restart_agent_with_no_worktree_sets_status_and_no_confirm() {
+        let mut a = app();
+        a.worktrees.clear();
+        a.selected_worktree = None;
+        handle_key(&mut a, key(KeyCode::Char('R')));
+        assert_eq!(a.overlay, Overlay::None);
+        assert_eq!(a.status.as_deref(), Some("no worktree selected"));
+    }
+
+    #[test]
+    fn confirming_restart_clears_active_session_and_sets_status() {
+        let mut a = app();
+        a.active_session = Some(SessionManager::session_name("main"));
+        handle_key(&mut a, key(KeyCode::Char('R')));
+        handle_key(&mut a, key(KeyCode::Char('y')));
+        assert_eq!(a.overlay, Overlay::None);
+        assert_eq!(a.active_session, None);
+        assert_eq!(a.status.as_deref(), Some("restarting agent for main"));
     }
 
     #[test]
