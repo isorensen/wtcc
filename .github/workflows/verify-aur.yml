@@ -1,0 +1,26 @@
+name: Verify AUR SSH (temporary)
+
+# One-off, manually-triggered, non-destructive check that AUR_SSH_PRIVATE_KEY
+# authenticates against the AUR. Does NOT push anything. Safe to delete after use.
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: ls-remote AUR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH for AUR
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" \
+            >> ~/.ssh/known_hosts
+          printf '%s\n' "Host aur.archlinux.org" "  IdentityFile ~/.ssh/aur_key" "  User aur" \
+            >> ~/.ssh/config
+
+      - name: Authenticate and list AUR repo refs (no push)
+        run: |
+          echo "Refs on the AUR wtcc repo (auth working if this succeeds):"
+          git ls-remote ssh://aur@aur.archlinux.org/wtcc.git
