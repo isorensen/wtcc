@@ -67,7 +67,7 @@ fn add_list_remove_worktree_flow() {
     let wt_parent = tempfile::tempdir().expect("create sibling tempdir");
     let new_wt_path = wt_parent.path().join("feature-x-wt");
 
-    worktree::add(repo_path, &new_wt_path, "feature-x").expect("add worktree");
+    worktree::add_new_branch(repo_path, &new_wt_path, "feature-x").expect("add worktree");
 
     let worktrees = worktree::list(repo_path).expect("list worktrees");
     let added = worktrees
@@ -90,4 +90,46 @@ fn add_list_remove_worktree_flow() {
         !after.iter().any(|w| w.branch == "feature-x"),
         "feature-x worktree should be gone after remove"
     );
+}
+
+#[test]
+fn add_existing_branch_checks_it_out_without_duplicate_error() {
+    if !git_available() {
+        eprintln!("skipping: git not available on PATH");
+        return;
+    }
+
+    let repo = init_repo();
+    let repo_path = repo.path();
+
+    // Pre-create a branch (without a worktree) to simulate reviewing a PR.
+    run_git(repo_path, &["branch", "review-me"]);
+
+    let wt_parent = tempfile::tempdir().expect("create sibling tempdir");
+    let new_wt_path = wt_parent.path().join("review-me-wt");
+
+    worktree::add_existing_branch(repo_path, &new_wt_path, "review-me")
+        .expect("add worktree for existing branch");
+
+    let worktrees = worktree::list(repo_path).expect("list worktrees");
+    assert!(
+        worktrees.iter().any(|w| w.branch == "review-me"),
+        "review-me worktree should check out the existing branch"
+    );
+}
+
+#[test]
+fn branch_exists_true_for_existing_false_otherwise() {
+    if !git_available() {
+        eprintln!("skipping: git not available on PATH");
+        return;
+    }
+
+    let repo = init_repo();
+    let repo_path = repo.path();
+
+    run_git(repo_path, &["branch", "already-here"]);
+
+    assert!(worktree::branch_exists(repo_path, "already-here"));
+    assert!(!worktree::branch_exists(repo_path, "does-not-exist"));
 }

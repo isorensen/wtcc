@@ -91,11 +91,56 @@ pub fn list(repo_path: &Path) -> anyhow::Result<Vec<Worktree>> {
     )))
 }
 
-pub fn add(repo_path: &Path, new_path: &Path, branch: &str) -> anyhow::Result<()> {
+/// Reports whether `name` resolves to an existing branch (local or remote) in
+/// the repo. Uses `git rev-parse --verify --quiet` against a concrete ref so the
+/// untrusted `name` is never interpreted as a flag or shell input; a non-zero
+/// exit (unknown ref) maps to `false` rather than an error.
+pub fn branch_exists(repo_path: &Path, name: &str) -> bool {
+    let repo = repo_path.to_string_lossy();
+    let local = format!("refs/heads/{name}");
+    if ref_resolves(&repo, &local) {
+        return true;
+    }
+    let remote = format!("refs/remotes/{name}");
+    ref_resolves(&repo, &remote)
+}
+
+fn ref_resolves(repo: &str, reference: &str) -> bool {
+    Command::new("git")
+        .args(["-C", repo, "rev-parse", "--verify", "--quiet", reference])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Creates a worktree on a NEW branch: `git worktree add -b <branch> <path>`.
+/// `branch` is passed as a discrete argv arg (the literal branch name, not
+/// slugified); the caller slugifies only the derived filesystem `new_path`.
+pub fn add_new_branch(repo_path: &Path, new_path: &Path, branch: &str) -> anyhow::Result<()> {
     let repo = repo_path.to_string_lossy();
     let new = new_path.to_string_lossy();
     let output = Command::new("git")
         .args(["-C", &repo, "worktree", "add", "-b", branch, &new])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
+/// Creates a worktree checking out an EXISTING branch:
+/// `git worktree add <path> <branch>`. Used to review a PR or resume work on a
+/// branch that already exists locally or on a remote.
+pub fn add_existing_branch(repo_path: &Path, new_path: &Path, branch: &str) -> anyhow::Result<()> {
+    let repo = repo_path.to_string_lossy();
+    let new = new_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", &repo, "worktree", "add", &new, branch])
         .output()?;
 
     if !output.status.success() {
