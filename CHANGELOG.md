@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-22
+
+### Added
+- CLI flags handled before the TUI starts: `--version`/`-V` and `--help`/`-h`;
+  an unknown flag errors to stderr and exits non-zero. First-run empty state now
+  guides the user to press `a` to register a repository (#37).
+- Basic mouse support: left-click a repo or worktree row to select it, click the
+  agent pane to focus it. Renderer and hit-test share one row ordering so clicks
+  can't drift from what's drawn (#38).
+
+### Fixed
+- The help overlay (`?`) is sized to its content, so the Agent section no longer
+  clips on short (≤24-row) terminals (#37).
+
 ## [0.4.0] - 2026-06-22
 
 ### Added
@@ -69,7 +83,8 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/isorensen/wtcc/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/isorensen/wtcc/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/isorensen/wtcc/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/isorensen/wtcc/compare/v0.1.0...v0.2.0
