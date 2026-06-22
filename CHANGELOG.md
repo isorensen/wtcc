@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-22
+
+### Added
+- Remove/unregister a repository from the TUI: the `D` keybind and the "Remove
+  repository" palette command, behind a confirm overlay. Config-only — never
+  deletes anything on disk (#23).
+- Per-worktree agent activity indicator in the sidebar: a diamond glyph (working
+  `◆`, idle `◇`, none blank) derived from PTY output cadence, kept distinct from
+  the selection marker (#24).
+- Help overlay: `?` opens a centered list of all keybindings grouped by focus;
+  the content is single-sourced next to the keymap to avoid drift (#25).
+- README demo: a reproducible ASCII screenshot of the command center plus
+  `docs/demo/capture.sh` to regenerate it (#26).
+
 ## [0.2.0] - 2026-06-22
 
 ### Added
@@ -45,6 +59,7 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/isorensen/wtcc/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/isorensen/wtcc/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/isorensen/wtcc/releases/tag/v0.1.0
