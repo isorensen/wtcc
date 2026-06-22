@@ -7,6 +7,31 @@ terminal (built and tested on [ghostty](https://github.com/ghostty-org/ghostty) 
 
 > **Status:** early development. See the [design spec](docs/superpowers/specs/2026-06-22-wtcc-tui-design.md).
 
+## Demo
+
+A repository's worktrees in the sidebar — each with an activity marker (`◆` working, `◇` idle) and
+git/PR status — beside the live agent terminal for the selected worktree:
+
+```text
+┌ repos ─────────────────────────┐┌ agent · feat/login ────────────────────────────────────┐
+│▸ acme-api                      ││Claude Code  —  acme-api · feat/login                   │
+│  ◇○ main                       ││                                                        │
+│  ◆● feat/login                 ││> implement the login form validation                   │
+│   ○ fix/payments               ││                                                        │
+│                                ││  ✓ read src/auth/login.ts                              │
+│                                ││  ✎ editing src/auth/validators.ts                      │
+│                                ││  ✓ added 3 tests                                       │
+│                                ││                                                        │
+│                                ││Running tests…  12 passed                               │
+│                                ││                                                        │
+└────────────────────────────────┘└────────────────────────────────────────────────────────┘
+j/k move  Tab agent  n/d worktree  a/D repo  r refresh  : palette  ? help  q/Ctrl-Q quit
+```
+
+Press `?` for the full keybinding overlay. These frames are reproducible with
+[`docs/demo/capture.sh`](docs/demo/capture.sh) (`cargo build --release` first); it seeds a throwaway
+repo and a scripted stand-in agent, so it touches neither your config nor a real Claude session.
+
 ## Why a TUI?
 
 Supacode embeds a Ghostty terminal surface per worktree, but that surface is macOS-only —
