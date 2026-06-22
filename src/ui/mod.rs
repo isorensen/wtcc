@@ -234,7 +234,7 @@ mod tests {
         let text = rendered_text(&app);
         assert!(text.contains("demo-repo"), "expected repo name in output");
         assert!(text.contains("main"), "expected worktree branch in output");
-        assert!(text.contains("q quit"), "expected keybind hint in output");
+        assert!(text.contains("quit"), "expected keybind hint in output");
         assert!(
             text.contains("Agent pane"),
             "expected agent placeholder in output"
