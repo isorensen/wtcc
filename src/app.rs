@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
 
 use crate::config::Config;
 use crate::session::SessionManager;
+use crate::vcs::{GitGhProvider, VcsProvider, VcsStatus};
 use crate::worktree::{self, Worktree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,16 @@ pub struct App {
     /// When set, config is persisted here instead of the default XDG path.
     /// Used by tests to redirect writes into a temp directory.
     pub config_path: Option<PathBuf>,
+    /// Cached VCS status per worktree path, filled asynchronously by a worker
+    /// thread (see `spawn_vcs_refresh`). Absent entries render as "not loaded".
+    pub vcs_status: HashMap<PathBuf, VcsStatus>,
+    /// Computes per-worktree status off the UI thread. Boxed behind a trait so
+    /// tests can inject a fake provider.
+    pub vcs_provider: Arc<dyn VcsProvider>,
+    /// Receiver for the in-flight VCS refresh worker, if any. Replaced on each
+    /// refresh; results from a superseded worker are simply never drained.
+    /// Replacing this `Receiver` drops it, so the orphaned worker's `Sender::send` returns `Err` and the thread exits.
+    vcs_rx: Option<Receiver<(PathBuf, VcsStatus)>>,
 }
 
 /// Expands a leading `~` to the home directory and resolves relative paths
@@ -85,6 +99,13 @@ fn expand_path(input: &str) -> Result<PathBuf, String> {
 
 impl App {
     pub fn new(config: Config) -> App {
+        Self::with_provider(config, Arc::new(GitGhProvider))
+    }
+
+    /// Constructs an `App` with an injected `VcsProvider`. Production uses
+    /// `GitGhProvider` via `new`; tests pass a fake to exercise caching and
+    /// error handling without spawning `git`/`gh`.
+    pub(crate) fn with_provider(config: Config, vcs_provider: Arc<dyn VcsProvider>) -> App {
         let selected_repo = (!config.repos.is_empty()).then_some(0);
         let mut app = App {
             config,
@@ -98,6 +119,9 @@ impl App {
             session_manager: SessionManager::new(),
             active_session: None,
             config_path: None,
+            vcs_status: HashMap::new(),
+            vcs_provider,
+            vcs_rx: None,
         };
         if selected_repo.is_some() {
             app.refresh_worktrees();
@@ -142,6 +166,48 @@ impl App {
                 self.selected_worktree = None;
                 self.status = Some(format!("worktree list failed: {e}"));
             }
+        }
+        self.spawn_vcs_refresh();
+    }
+
+    /// Spawns a worker thread that computes `VcsStatus` for every current
+    /// worktree and streams results back over a channel. Kept off the UI thread
+    /// because `gh` can take seconds. A previously in-flight worker is dropped:
+    /// its sender's results are simply never drained. Stale cache entries (for
+    /// removed worktrees) are pruned up front.
+    pub fn spawn_vcs_refresh(&mut self) {
+        let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
+            self.vcs_rx = None;
+            return;
+        };
+        let live: std::collections::HashSet<PathBuf> =
+            self.worktrees.iter().map(|w| w.path.clone()).collect();
+        self.vcs_status.retain(|k, _| live.contains(k));
+
+        let worktrees = self.worktrees.clone();
+        let provider = Arc::clone(&self.vcs_provider);
+        let (tx, rx) = mpsc::channel();
+        self.vcs_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            for wt in &worktrees {
+                let status = provider.status(&repo, wt);
+                if tx.send((wt.path.clone(), status)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Drains any VCS results produced since the last call into the cache.
+    /// Non-blocking; called once per frame by the main loop.
+    pub fn drain_vcs(&mut self) {
+        let Some(rx) = &self.vcs_rx else {
+            return;
+        };
+        let updates: Vec<(PathBuf, VcsStatus)> = rx.try_iter().collect();
+        for (path, status) in updates {
+            self.vcs_status.insert(path, status);
         }
     }
 
@@ -308,6 +374,42 @@ impl App {
 mod tests {
     use super::*;
     use crate::repository::Repository;
+    use crate::vcs::{ChecksState, PrState, PrStatus};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Returns a fixed dirty/PR status for every worktree.
+    struct FakeProvider {
+        status: VcsStatus,
+    }
+    impl VcsProvider for FakeProvider {
+        fn status(&self, _repo: &std::path::Path, _wt: &Worktree) -> VcsStatus {
+            self.status
+        }
+    }
+
+    /// Yields a clean/no-PR status but flips a flag, proving the worker ran even
+    /// when it reports "nothing interesting" (the App-error analogue: a provider
+    /// that returns default leaves `vcs_status` populated, never unset/panicking).
+    struct FlagProvider {
+        called: Arc<AtomicBool>,
+    }
+    impl VcsProvider for FlagProvider {
+        fn status(&self, _repo: &std::path::Path, _wt: &Worktree) -> VcsStatus {
+            self.called.store(true, Ordering::SeqCst);
+            VcsStatus::default()
+        }
+    }
+
+    fn drain_until<F: Fn(&App) -> bool>(app: &mut App, done: F) -> bool {
+        for _ in 0..200 {
+            app.drain_vcs();
+            if done(app) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
 
     fn config_with_repo() -> Config {
         Config {
@@ -348,6 +450,9 @@ mod tests {
             session_manager: SessionManager::new(),
             active_session: None,
             config_path: None,
+            vcs_status: HashMap::new(),
+            vcs_provider: Arc::new(GitGhProvider),
+            vcs_rx: None,
         };
         app.selected_worktree = Some(0);
         app
@@ -403,5 +508,112 @@ mod tests {
     #[test]
     fn expand_path_tilde_user_returns_err() {
         assert!(expand_path("~otheruser/foo").is_err());
+    }
+
+    #[test]
+    fn vcs_refresh_caches_provider_results() {
+        let pr = PrStatus {
+            number: 42,
+            state: PrState::Open,
+            checks: ChecksState::Passing,
+        };
+        let mut app = app_with_fake_worktrees();
+        app.vcs_provider = Arc::new(FakeProvider {
+            status: VcsStatus {
+                dirty: true,
+                pr: Some(pr),
+            },
+        });
+        app.spawn_vcs_refresh();
+        assert!(
+            drain_until(&mut app, |a| a.vcs_status.len() == a.worktrees.len()),
+            "vcs worker did not deliver in time"
+        );
+
+        assert_eq!(app.vcs_status.len(), 2);
+        let main = app.vcs_status.get(&PathBuf::from("/repo/main")).unwrap();
+        assert!(main.dirty);
+        assert_eq!(main.pr, Some(pr));
+    }
+
+    #[test]
+    fn vcs_refresh_with_default_status_leaves_cache_populated_not_unset() {
+        let called = Arc::new(AtomicBool::new(false));
+        let mut app = app_with_fake_worktrees();
+        app.vcs_provider = Arc::new(FlagProvider {
+            called: Arc::clone(&called),
+        });
+        app.spawn_vcs_refresh();
+        assert!(
+            drain_until(&mut app, |a| a.vcs_status.len() == a.worktrees.len()),
+            "vcs worker did not deliver in time"
+        );
+
+        assert!(called.load(Ordering::SeqCst));
+        let main = app.vcs_status.get(&PathBuf::from("/repo/main")).unwrap();
+        assert!(!main.dirty);
+        assert_eq!(main.pr, None);
+    }
+
+    #[test]
+    fn vcs_refresh_prunes_stale_entries_for_removed_worktrees() {
+        let mut app = app_with_fake_worktrees();
+        app.vcs_status
+            .insert(PathBuf::from("/repo/gone"), VcsStatus::default());
+        app.vcs_provider = Arc::new(FakeProvider {
+            status: VcsStatus::default(),
+        });
+        app.spawn_vcs_refresh();
+        assert!(!app.vcs_status.contains_key(&PathBuf::from("/repo/gone")));
+    }
+
+    #[test]
+    fn drain_vcs_is_noop_without_refresh() {
+        let mut app = app_with_fake_worktrees();
+        app.drain_vcs();
+        assert!(app.vcs_status.is_empty());
+    }
+
+    #[test]
+    fn superseded_worker_results_never_appear_in_cache() {
+        // First provider returns dirty=true; second returns dirty=false.
+        // Spawning a second refresh supersedes the first — only the second
+        // provider's results should land in the cache.
+        struct ProviderA;
+        impl VcsProvider for ProviderA {
+            fn status(&self, _repo: &std::path::Path, _wt: &Worktree) -> VcsStatus {
+                VcsStatus {
+                    dirty: true,
+                    pr: None,
+                }
+            }
+        }
+
+        struct ProviderB;
+        impl VcsProvider for ProviderB {
+            fn status(&self, _repo: &std::path::Path, _wt: &Worktree) -> VcsStatus {
+                VcsStatus {
+                    dirty: false,
+                    pr: None,
+                }
+            }
+        }
+
+        let mut app = app_with_fake_worktrees();
+        app.vcs_provider = Arc::new(ProviderA);
+        app.spawn_vcs_refresh();
+        // Immediately supersede with provider B — drops the first receiver.
+        app.vcs_provider = Arc::new(ProviderB);
+        app.spawn_vcs_refresh();
+
+        assert!(
+            drain_until(&mut app, |a| a.vcs_status.len() == a.worktrees.len()),
+            "vcs worker did not deliver in time"
+        );
+
+        // All entries must reflect provider B (dirty=false).
+        for status in app.vcs_status.values() {
+            assert!(!status.dirty, "expected provider B (dirty=false) in cache");
+        }
     }
 }

@@ -42,6 +42,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
         let area = Rect::new(0, 0, size.width, size.height);
         let (rows, cols) = ui::agent_pane_size(area);
         app.ensure_active_session(rows, cols);
+        app.drain_vcs();
         if last_size != Some((rows, cols)) {
             app.session_manager.resize_all(rows, cols);
             last_size = Some((rows, cols));
