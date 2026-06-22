@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-22
+
+### Added
+- Restart a worktree's agent from the TUI: `R` (and the "Restart agent" palette
+  command), behind a confirm overlay — kills the tmux session and respawns a
+  fresh agent. Useful when an agent hangs (#32).
+- `n` (add worktree) now accepts an **existing** branch: if the typed branch
+  already exists (local or remote) it is checked out into a new worktree;
+  otherwise a new branch is created. One input, auto-detected (#33).
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
@@ -59,7 +69,8 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/isorensen/wtcc/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/isorensen/wtcc/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/isorensen/wtcc/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/isorensen/wtcc/releases/tag/v0.1.0
