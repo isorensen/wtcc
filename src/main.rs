@@ -7,7 +7,9 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use crossterm::event::{self, Event};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -18,7 +20,7 @@ use ratatui::layout::Rect;
 
 use wtcc::app::App;
 use wtcc::config::Config;
-use wtcc::event::handle_key;
+use wtcc::event::{handle_key, handle_mouse};
 use wtcc::ui;
 
 const POLL: Duration = Duration::from_millis(16);
@@ -104,11 +106,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
-        if event::poll(POLL)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == event::KeyEventKind::Press
-        {
-            handle_key(&mut app, key);
+        if event::poll(POLL)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+                    handle_key(&mut app, key);
+                }
+                Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
+                    handle_mouse(&mut app, m.column, m.row, area);
+                }
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -117,13 +124,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
 
 fn restore_terminal() -> anyhow::Result<()> {
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show)?;
+    execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )?;
     Ok(())
 }
 
