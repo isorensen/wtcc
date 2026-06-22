@@ -23,7 +23,7 @@ ratatui = "0.29.0"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "1.1.2"
-tui-term = "0.2.0"
+tui-term = "0.3.0"
 vt100 = "0.15.2"
 
 [dev-dependencies]
