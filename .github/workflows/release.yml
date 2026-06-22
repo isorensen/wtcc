@@ -1,0 +1,104 @@
+name: Release
+
+# Triggered by pushing a version tag (e.g., v0.2.0).
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install runtime deps for tests
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --all
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: target/release/wtcc
+
+  # Publishes the updated PKGBUILD to the AUR.
+  # Required secret: AUR_SSH_PRIVATE_KEY (ed25519 private key whose public half is
+  # registered on the maintainer's AUR account). packaging/aur/PKGBUILD is the
+  # source of truth; only pkgver/pkgrel/sha256 are refreshed per release.
+  aur-publish:
+    name: Publish to AUR
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source tarball and compute checksum
+        id: checksum
+        run: |
+          curl -sL "https://github.com/isorensen/wtcc/archive/${GITHUB_REF_NAME}.tar.gz" \
+            -o source.tar.gz
+          sha256=$(sha256sum source.tar.gz | cut -d' ' -f1)
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH for AUR
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          echo "aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN" \
+            >> ~/.ssh/known_hosts
+          printf '%s\n' "Host aur.archlinux.org" "  IdentityFile ~/.ssh/aur_key" "  User aur" \
+            >> ~/.ssh/config
+
+      - name: Clone AUR repo
+        run: git clone ssh://aur@aur.archlinux.org/wtcc.git aur-repo
+
+      - name: Update PKGBUILD from source of truth
+        run: |
+          cp packaging/aur/PKGBUILD aur-repo/PKGBUILD
+          cd aur-repo
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${{ steps.checksum.outputs.sha256 }}')/" PKGBUILD
+
+      - name: Generate .SRCINFO
+        working-directory: aur-repo
+        run: |
+          docker run --rm -v "$PWD":/pkg -w /pkg archlinux:latest bash -c "
+            pacman -Sy --noconfirm base-devel &&
+            useradd -m builder &&
+            chown -R builder:builder /pkg &&
+            su builder -c 'makepkg --printsrcinfo > .SRCINFO'
+          "
+
+      - name: Fix ownership after docker
+        working-directory: aur-repo
+        run: sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Commit and push to AUR
+        working-directory: aur-repo
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ steps.version.outputs.version }}"
+          git push
