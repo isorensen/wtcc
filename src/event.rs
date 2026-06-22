@@ -11,7 +11,7 @@ pub const HELP_SIDEBAR: &[(&str, &str)] = &[
     ("Tab", "focus agent"),
     ("a", "register repo"),
     ("D", "unregister repo"),
-    ("n", "add worktree"),
+    ("n", "add worktree (new/existing branch)"),
     ("d", "remove worktree"),
     ("R", "restart agent"),
     ("r", "refresh"),

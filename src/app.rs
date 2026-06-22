@@ -315,7 +315,14 @@ impl App {
         };
         let slug = worktree::slugify(branch);
         let new_path = repo.join(".worktrees").join(&slug);
-        match worktree::add(&repo, &new_path, branch) {
+        // Auto-detect: an existing branch is checked out (review a PR / resume
+        // work); an unknown name becomes a new branch. No mode toggle needed.
+        let result = if worktree::branch_exists(&repo, branch) {
+            worktree::add_existing_branch(&repo, &new_path, branch)
+        } else {
+            worktree::add_new_branch(&repo, &new_path, branch)
+        };
+        match result {
             Ok(()) => {
                 self.status = Some(format!("added worktree {branch}"));
                 self.refresh_worktrees();

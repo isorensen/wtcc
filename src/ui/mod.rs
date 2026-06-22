@@ -139,7 +139,7 @@ fn render_input(prompt: &Prompt, buffer: &str, area: Rect, buf: &mut Buffer) {
     Clear.render(rect, buf);
 
     let (title, label) = match prompt {
-        Prompt::AddWorktree => (" new worktree branch ", "branch: "),
+        Prompt::AddWorktree => (" add worktree ", "branch (new or existing): "),
         Prompt::AddRepo => (" register repository ", "path: "),
     };
     let block = Block::default().title(title).borders(Borders::ALL);
