@@ -71,11 +71,25 @@ fn worktree_line<'a>(
         style = style.add_modifier(Modifier::REVERSED);
     }
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw("    "),
         Span::raw(format!("{glyph} ")),
         Span::styled(label, style),
-    ])
+    ];
+
+    if let Some(badge) = app
+        .vcs_status
+        .get(&wt.path)
+        .map(crate::vcs::status_badge)
+        .filter(|b| !b.is_empty())
+    {
+        spans.push(Span::styled(
+            format!(" {badge}"),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn short_path(path: &std::path::Path) -> String {

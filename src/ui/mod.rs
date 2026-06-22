@@ -189,31 +189,21 @@ mod tests {
     use std::path::PathBuf;
 
     fn app_for_render() -> App {
-        let mut app = App {
-            config: Config {
-                repos: vec![Repository {
-                    name: "demo-repo".to_string(),
-                    path: PathBuf::from("/tmp/demo-repo"),
-                }],
-                agent_cmd: "claude".to_string(),
-            },
-            selected_repo: Some(0),
-            worktrees: vec![Worktree {
-                path: PathBuf::from("/tmp/demo-repo/main"),
-                branch: "main".to_string(),
-                head: "abc123".to_string(),
-                is_bare: false,
-                is_detached: false,
+        let mut app = App::new(Config {
+            repos: vec![Repository {
+                name: "demo-repo".to_string(),
+                path: PathBuf::from("/tmp/demo-repo"),
             }],
-            selected_worktree: Some(0),
-            focus: crate::app::Focus::Sidebar,
-            overlay: Overlay::None,
-            status: None,
-            should_quit: false,
-            session_manager: crate::session::SessionManager::new(),
-            active_session: None,
-            config_path: None,
-        };
+            agent_cmd: "claude".to_string(),
+        });
+        app.worktrees = vec![Worktree {
+            path: PathBuf::from("/tmp/demo-repo/main"),
+            branch: "main".to_string(),
+            head: "abc123".to_string(),
+            is_bare: false,
+            is_detached: false,
+        }];
+        app.selected_worktree = Some(0);
         app.status = None;
         app
     }

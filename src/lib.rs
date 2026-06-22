@@ -4,4 +4,5 @@ pub mod event;
 pub mod repository;
 pub mod session;
 pub mod ui;
+pub mod vcs;
 pub mod worktree;
