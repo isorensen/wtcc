@@ -8,6 +8,18 @@ updates:
     labels:
       - chore
       - security
+    # ratatui 0.29 and its ecosystem are version-locked: tui-term 0.3 / vt100 0.16
+    # pull a unicode-width that conflicts with ratatui 0.29. Allow only patch bumps
+    # until a coordinated migration to ratatui 0.30 (see CHANGELOG "Notes").
+    ignore:
+      - dependency-name: ratatui
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: crossterm
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: tui-term
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: vt100
+        update-types: [version-update:semver-minor, version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: "/"
