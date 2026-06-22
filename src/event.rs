@@ -1,7 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 
 use crate::app::{App, Confirm, Focus, Overlay, Prompt};
+use crate::repository::Repository;
 use crate::ui::palette::{self, Command};
+use crate::ui::sidebar::{self, SidebarRow};
+use crate::ui::{SIDEBAR_WIDTH, STATUS_HEIGHT};
+use crate::worktree::Worktree;
 
 /// Keybindings shown in the `?` help overlay, grouped by focus. Kept next to
 /// the keymap (`handle_primary`/`handle_agent`) so a binding change here is an
@@ -65,6 +70,84 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Overlay::Confirm(_) => handle_confirm(app, key),
         // Any key dismisses the help overlay; it never leaks to the panes.
         Overlay::Help => app.overlay = Overlay::None,
+    }
+}
+
+/// The UI element under a click, resolved by [`hit_test`]. `Repo`/`Worktree`
+/// carry the index the click selects; `Agent` focuses the agent pane; `None` is
+/// a blank/inert area (no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hit {
+    None,
+    Agent,
+    Repo(usize),
+    Worktree(usize),
+}
+
+/// Pure hit-test: maps a click at `(col, row)` within `area` to a [`Hit`],
+/// mirroring `ui::render`'s layout exactly. The body is everything above the
+/// status line; the sidebar is a bordered block on the left and the agent pane
+/// fills the rest. Sidebar rows are resolved through [`sidebar::sidebar_rows`]
+/// so this can never drift from what the sidebar draws. No I/O, no panics.
+pub fn hit_test(
+    col: u16,
+    row: u16,
+    area: Rect,
+    repos: &[Repository],
+    worktrees: &[Worktree],
+    selected_repo: Option<usize>,
+) -> Hit {
+    let body_height = area.height.saturating_sub(STATUS_HEIGHT);
+    // Below the body (status line, or off-screen) is inert.
+    if row >= body_height {
+        return Hit::None;
+    }
+
+    if col >= SIDEBAR_WIDTH {
+        return Hit::Agent;
+    }
+
+    // Inside the sidebar's bordered block: the list starts one cell in from the
+    // top/left border. A click on the border itself selects nothing.
+    if row == 0 || col == 0 || col >= SIDEBAR_WIDTH - 1 {
+        return Hit::None;
+    }
+    let list_index = (row - 1) as usize;
+    match sidebar::sidebar_rows(repos, worktrees, selected_repo).get(list_index) {
+        Some(SidebarRow::RepoHeader(ri)) => Hit::Repo(*ri),
+        Some(SidebarRow::Worktree(wi)) => Hit::Worktree(*wi),
+        _ => Hit::None,
+    }
+}
+
+/// Applies a left-click at `(col, row)` to the app, given the current terminal
+/// `area`. Clicks in the sidebar focus it; clicks in the agent pane focus it.
+/// Overlays absorb clicks (no-op) to keep modal handling simple. Pure state
+/// transition: no terminal I/O, never panics on out-of-range clicks.
+pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
+    if !matches!(app.overlay, Overlay::None) {
+        return;
+    }
+    match hit_test(
+        col,
+        row,
+        area,
+        &app.config.repos,
+        &app.worktrees,
+        app.selected_repo,
+    ) {
+        Hit::None => {}
+        Hit::Agent => app.focus = Focus::Agent,
+        Hit::Repo(i) => {
+            app.focus = Focus::Sidebar;
+            app.select_repo(i);
+        }
+        Hit::Worktree(i) => {
+            app.focus = Focus::Sidebar;
+            if i < app.worktrees.len() {
+                app.selected_worktree = Some(i);
+            }
+        }
     }
 }
 
@@ -495,5 +578,121 @@ mod tests {
         handle_key(&mut a, key(KeyCode::Char('x')));
         assert!(!a.should_quit);
         assert_eq!(a.focus, before);
+    }
+
+    // --- mouse / hit-test ---------------------------------------------------
+
+    fn repos(n: usize) -> Vec<Repository> {
+        (0..n)
+            .map(|i| Repository {
+                name: format!("repo{i}"),
+                path: PathBuf::from(format!("/tmp/repo{i}")),
+            })
+            .collect()
+    }
+
+    fn worktrees(n: usize) -> Vec<Worktree> {
+        (0..n)
+            .map(|i| Worktree {
+                path: PathBuf::from(format!("/repo/wt{i}")),
+                branch: format!("wt{i}"),
+                head: "abc".to_string(),
+                is_bare: false,
+                is_detached: false,
+            })
+            .collect()
+    }
+
+    /// Layout for one selected repo with two worktrees. Sidebar list rows
+    /// (offset from the inner top, i.e. screen row 1+):
+    ///   row 1 -> RepoHeader(0)
+    ///   row 2 -> Worktree(0)
+    ///   row 3 -> Worktree(1)
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    #[test]
+    fn hit_repo_header_row() {
+        let hit = hit_test(2, 1, area(), &repos(2), &worktrees(2), Some(0));
+        assert_eq!(hit, Hit::Repo(0));
+    }
+
+    #[test]
+    fn hit_worktree_rows_under_selected_repo() {
+        let r = repos(2);
+        let w = worktrees(2);
+        assert_eq!(hit_test(3, 2, area(), &r, &w, Some(0)), Hit::Worktree(0));
+        assert_eq!(hit_test(3, 3, area(), &r, &w, Some(0)), Hit::Worktree(1));
+    }
+
+    #[test]
+    fn second_repo_header_falls_after_first_repos_worktrees() {
+        // rows: 1=Repo(0), 2=Worktree(0), 3=Worktree(1), 4=Repo(1)
+        let hit = hit_test(2, 4, area(), &repos(2), &worktrees(2), Some(0));
+        assert_eq!(hit, Hit::Repo(1));
+    }
+
+    #[test]
+    fn hit_agent_region() {
+        let hit = hit_test(SIDEBAR_WIDTH, 5, area(), &repos(1), &worktrees(1), Some(0));
+        assert_eq!(hit, Hit::Agent);
+    }
+
+    #[test]
+    fn hit_status_line_is_none() {
+        // Last body row is height-1-STATUS_HEIGHT; the status line itself is row 23.
+        let hit = hit_test(2, 23, area(), &repos(1), &worktrees(1), Some(0));
+        assert_eq!(hit, Hit::None);
+    }
+
+    #[test]
+    fn hit_blank_sidebar_space_is_none() {
+        // Below the last list row (only Repo(0)+2 worktrees occupy rows 1..=3).
+        let hit = hit_test(2, 10, area(), &repos(1), &worktrees(2), Some(0));
+        assert_eq!(hit, Hit::None);
+    }
+
+    #[test]
+    fn hit_top_and_left_border_is_none() {
+        let r = repos(1);
+        let w = worktrees(1);
+        assert_eq!(hit_test(2, 0, area(), &r, &w, Some(0)), Hit::None); // top border
+        assert_eq!(hit_test(0, 1, area(), &r, &w, Some(0)), Hit::None); // left border
+    }
+
+    #[test]
+    fn hit_does_not_panic_on_out_of_range() {
+        let hit = hit_test(1000, 1000, area(), &repos(1), &worktrees(1), Some(0));
+        assert_eq!(hit, Hit::None);
+    }
+
+    #[test]
+    fn handle_mouse_worktree_selects_and_focuses_sidebar() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        a.focus = Focus::Agent;
+        handle_mouse(&mut a, 3, 3, area()); // Worktree(1)
+        assert_eq!(a.selected_worktree, Some(1));
+        assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn handle_mouse_agent_region_focuses_agent() {
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        handle_mouse(&mut a, SIDEBAR_WIDTH + 2, 4, area());
+        assert_eq!(a.focus, Focus::Agent);
+    }
+
+    #[test]
+    fn handle_mouse_ignored_while_overlay_open() {
+        let mut a = app();
+        a.focus = Focus::Sidebar;
+        a.overlay = Overlay::Help;
+        handle_mouse(&mut a, SIDEBAR_WIDTH + 2, 4, area());
+        assert_eq!(a.focus, Focus::Sidebar);
+        assert_eq!(a.overlay, Overlay::Help);
     }
 }

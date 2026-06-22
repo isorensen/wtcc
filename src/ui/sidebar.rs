@@ -5,7 +5,47 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Widget};
 
 use crate::app::{App, Focus};
+use crate::repository::Repository;
 use crate::session::ActivityState;
+use crate::worktree::Worktree;
+
+/// One rendered row of the sidebar list, in render order. Both [`render`] and
+/// [`crate::event::hit_test`] build this same sequence so the click→item mapping
+/// can never drift from what is drawn. `RepoHeader`/`Worktree` carry the index a
+/// click selects; the others are inert (clicking them is a no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarRow {
+    RepoHeader(usize),
+    NoWorktrees,
+    Worktree(usize),
+    EmptyHint,
+}
+
+/// The ordered list of sidebar rows for the current app state. This is the
+/// single source of truth for row order; the renderer turns each into a
+/// `ListItem` and the hit-test maps a click offset back to a row.
+pub fn sidebar_rows(
+    repos: &[Repository],
+    worktrees: &[Worktree],
+    selected_repo: Option<usize>,
+) -> Vec<SidebarRow> {
+    let mut rows = Vec::new();
+    for ri in 0..repos.len() {
+        rows.push(SidebarRow::RepoHeader(ri));
+        if selected_repo == Some(ri) {
+            if worktrees.is_empty() {
+                rows.push(SidebarRow::NoWorktrees);
+            }
+            for wi in 0..worktrees.len() {
+                rows.push(SidebarRow::Worktree(wi));
+            }
+        }
+    }
+    if repos.is_empty() {
+        rows.push(SidebarRow::EmptyHint);
+    }
+    rows
+}
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let focused = app.focus == Focus::Sidebar;
@@ -20,32 +60,31 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let mut items: Vec<ListItem> = Vec::new();
-
-    for (ri, repo) in app.config.repos.iter().enumerate() {
-        let is_current_repo = app.selected_repo == Some(ri);
-        let glyph = if is_current_repo { "▸" } else { " " };
-        items.push(ListItem::new(Line::from(vec![
-            Span::raw(format!("{glyph} ")),
-            Span::styled(
-                repo.name.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ])));
-
-        if is_current_repo {
-            if app.worktrees.is_empty() {
-                items.push(ListItem::new(Line::from("    (no worktrees)")));
+    let rows = sidebar_rows(&app.config.repos, &app.worktrees, app.selected_repo);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| match *row {
+            SidebarRow::RepoHeader(ri) => {
+                let glyph = if app.selected_repo == Some(ri) {
+                    "▸"
+                } else {
+                    " "
+                };
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{glyph} ")),
+                    Span::styled(
+                        app.config.repos[ri].name.clone(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]))
             }
-            for (wi, wt) in app.worktrees.iter().enumerate() {
-                items.push(ListItem::new(worktree_line(app, focused, wi, wt)));
+            SidebarRow::NoWorktrees => ListItem::new(Line::from("    (no worktrees)")),
+            SidebarRow::Worktree(wi) => {
+                ListItem::new(worktree_line(app, focused, wi, &app.worktrees[wi]))
             }
-        }
-    }
-
-    if app.config.repos.is_empty() {
-        items.push(ListItem::new(Line::from("  press a to register a repo")));
-    }
+            SidebarRow::EmptyHint => ListItem::new(Line::from("  press a to register a repo")),
+        })
+        .collect();
 
     List::new(items).block(block).render(area, buf);
 }

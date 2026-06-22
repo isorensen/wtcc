@@ -13,8 +13,8 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 use crate::app::{App, Confirm, Focus, Overlay, Prompt};
 
 const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a repository";
-const SIDEBAR_WIDTH: u16 = 34;
-const STATUS_HEIGHT: u16 = 1;
+pub(crate) const SIDEBAR_WIDTH: u16 = 34;
+pub(crate) const STATUS_HEIGHT: u16 = 1;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
