@@ -14,6 +14,7 @@ pub enum Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt {
     AddWorktree,
+    AddRepo,
 }
 
 /// What the user is being asked to confirm while a confirm overlay is open.
@@ -49,6 +50,37 @@ pub struct App {
     pub should_quit: bool,
     pub session_manager: SessionManager,
     pub active_session: Option<String>,
+    /// When set, config is persisted here instead of the default XDG path.
+    /// Used by tests to redirect writes into a temp directory.
+    pub config_path: Option<PathBuf>,
+}
+
+/// Expands a leading `~` to the home directory and resolves relative paths
+/// against the current working directory. Pure path manipulation: it does not
+/// touch the filesystem beyond reading `$HOME`/cwd, so a non-existent path
+/// still round-trips (the dir check happens in `repository::register`).
+///
+/// Returns `Err` for the `~user` form, which is not supported.
+fn expand_path(input: &str) -> Result<PathBuf, String> {
+    if input.starts_with('~') && input != "~" && !input.starts_with("~/") {
+        return Err("unsupported ~user path; use an absolute path or ~/".to_string());
+    }
+    let tilde = (input == "~")
+        .then_some("")
+        .or_else(|| input.strip_prefix("~/"));
+    if let Some(rest) = tilde
+        && let Some(home) = dirs::home_dir()
+    {
+        return Ok(home.join(rest));
+    }
+    let path = PathBuf::from(input);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => Ok(cwd.join(path)),
+        Err(_) => Ok(path),
+    }
 }
 
 impl App {
@@ -65,6 +97,7 @@ impl App {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            config_path: None,
         };
         if selected_repo.is_some() {
             app.refresh_worktrees();
@@ -212,6 +245,50 @@ impl App {
         }
     }
 
+    /// Registers a repository from a user-entered path: expands `~` and resolves
+    /// relative paths against the current directory, validates it is a git repo,
+    /// then persists, selects it, and loads its worktrees. All failure modes
+    /// (bad path, not a git repo, save error) land in `status` — never panics.
+    pub fn register_repository(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            self.status = Some("path cannot be empty".to_string());
+            return;
+        }
+        let expanded = match expand_path(input) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status = Some(e);
+                return;
+            }
+        };
+        let resolved = std::fs::canonicalize(&expanded).unwrap_or(expanded);
+        let repo = match crate::repository::register(resolved) {
+            Ok(repo) => repo,
+            Err(e) => {
+                self.status = Some(format!("register failed: {e}"));
+                return;
+            }
+        };
+        if self.config.repos.iter().any(|r| r.path == repo.path) {
+            self.status = Some(format!("repo already registered: {}", repo.name));
+            return;
+        }
+        let name = repo.name.clone();
+        self.config.repos.push(repo);
+        let save = match &self.config_path {
+            Some(path) => self.config.save_to(path),
+            None => self.config.save(),
+        };
+        if let Err(e) = save {
+            self.config.repos.pop();
+            self.status = Some(format!("save failed: {e}"));
+            return;
+        }
+        self.select_repo(self.config.repos.len() - 1);
+        self.status = Some(format!("registered repo {name}"));
+    }
+
     pub fn remove_worktree(&mut self, path: &std::path::Path) {
         let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
             self.status = Some("no repo selected".to_string());
@@ -270,6 +347,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            config_path: None,
         };
         app.selected_worktree = Some(0);
         app
@@ -312,5 +390,18 @@ mod tests {
         let mut app = app_with_fake_worktrees();
         app.add_worktree("   ");
         assert_eq!(app.status.as_deref(), Some("branch name cannot be empty"));
+    }
+
+    #[test]
+    fn expand_path_tilde_slash_joins_home_dir() {
+        if let Some(home) = dirs::home_dir() {
+            let result = expand_path("~/myrepo").expect("tilde-slash should expand without error");
+            assert_eq!(result, home.join("myrepo"));
+        }
+    }
+
+    #[test]
+    fn expand_path_tilde_user_returns_err() {
+        assert!(expand_path("~otheruser/foo").is_err());
     }
 }

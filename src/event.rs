@@ -91,6 +91,7 @@ fn handle_primary(app: &mut App, key: KeyEvent, ctrl: bool) {
         KeyCode::Char('k') | KeyCode::Up => app.prev(),
         KeyCode::Tab => app.toggle_focus(),
         KeyCode::Char('r') => app.refresh_worktrees(),
+        KeyCode::Char('a') => open_register_prompt(app),
         KeyCode::Char('n') => open_add_prompt(app),
         KeyCode::Char('d') => request_remove(app),
         _ => {}
@@ -146,6 +147,7 @@ fn handle_input(app: &mut App, key: KeyEvent) {
             app.overlay = Overlay::None;
             match prompt {
                 Prompt::AddWorktree => app.add_worktree(&value),
+                Prompt::AddRepo => app.register_repository(&value),
             }
         }
         _ => {}
@@ -187,6 +189,13 @@ fn open_add_prompt(app: &mut App) {
     };
 }
 
+fn open_register_prompt(app: &mut App) {
+    app.overlay = Overlay::Input {
+        prompt: Prompt::AddRepo,
+        buffer: String::new(),
+    };
+}
+
 fn request_remove(app: &mut App) {
     match app.current_worktree() {
         Some(wt) => app.overlay = Overlay::Confirm(Confirm::RemoveWorktree(wt.path.clone())),
@@ -196,6 +205,7 @@ fn request_remove(app: &mut App) {
 
 fn run_command(app: &mut App, cmd: Command) {
     match cmd {
+        Command::AddRepo => open_register_prompt(app),
         Command::AddWorktree => open_add_prompt(app),
         Command::RemoveWorktree => request_remove(app),
         Command::SwitchRepo => app.cycle_repo(),
@@ -282,6 +292,19 @@ mod tests {
         let mut a = app();
         handle_key(&mut a, key(KeyCode::Char('n')));
         assert!(matches!(a.overlay, Overlay::Input { .. }));
+    }
+
+    #[test]
+    fn a_opens_register_repo_prompt() {
+        let mut a = app();
+        handle_key(&mut a, key(KeyCode::Char('a')));
+        assert!(matches!(
+            a.overlay,
+            Overlay::Input {
+                prompt: Prompt::AddRepo,
+                ..
+            }
+        ));
     }
 
     #[test]
