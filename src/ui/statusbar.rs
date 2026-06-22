@@ -7,7 +7,7 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::app::{App, Focus};
 
 const SIDEBAR_HINTS: &str =
-    "j/k move  Tab focus agent  n add  d remove  r refresh  : palette  q/Ctrl-Q quit";
+    "j/k move  Tab focus agent  a add repo  n add  d remove  r refresh  : palette  q/Ctrl-Q quit";
 const AGENT_HINTS: &str = "keys go to the agent  Ctrl-O back to sidebar  Ctrl-Q quit";
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {

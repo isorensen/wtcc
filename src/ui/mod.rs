@@ -124,15 +124,16 @@ fn render_input(prompt: &Prompt, buffer: &str, area: Rect, buf: &mut Buffer) {
     let rect = centered(60, 20, area);
     Clear.render(rect, buf);
 
-    let title = match prompt {
-        Prompt::AddWorktree => " new worktree branch ",
+    let (title, label) = match prompt {
+        Prompt::AddWorktree => (" new worktree branch ", "branch: "),
+        Prompt::AddRepo => (" register repository ", "path: "),
     };
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(rect);
     block.render(rect, buf);
 
     Paragraph::new(Line::from(vec![
-        Span::raw("branch: "),
+        Span::raw(label),
         Span::raw(buffer),
         Span::styled("█", Style::default().add_modifier(Modifier::SLOW_BLINK)),
     ]))
@@ -211,6 +212,7 @@ mod tests {
             should_quit: false,
             session_manager: crate::session::SessionManager::new(),
             active_session: None,
+            config_path: None,
         };
         app.status = None;
         app

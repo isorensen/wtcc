@@ -3,6 +3,7 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    AddRepo,
     AddWorktree,
     RemoveWorktree,
     SwitchRepo,
@@ -11,7 +12,8 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 5] = [
+    pub const ALL: [Command; 6] = [
+        Command::AddRepo,
         Command::AddWorktree,
         Command::RemoveWorktree,
         Command::SwitchRepo,
@@ -21,6 +23,7 @@ impl Command {
 
     pub fn label(self) -> &'static str {
         match self {
+            Command::AddRepo => "Add repository",
             Command::AddWorktree => "Add worktree",
             Command::RemoveWorktree => "Remove worktree",
             Command::SwitchRepo => "Switch repo",
@@ -64,8 +67,14 @@ mod tests {
 
     #[test]
     fn fuzzy_query_ranks_best_match_first() {
-        let result = filter("add");
+        let result = filter("worktree");
         assert_eq!(result.first(), Some(&Command::AddWorktree));
+    }
+
+    #[test]
+    fn fuzzy_query_matches_add_repo() {
+        let result = filter("repo");
+        assert_eq!(result.first(), Some(&Command::AddRepo));
     }
 
     #[test]
