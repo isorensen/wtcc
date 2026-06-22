@@ -1,0 +1,29 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Secrets & credentials (defense-in-depth — wtcc stores no secrets, but never commit these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+token*.json
+*secret*.json
+id_rsa
+id_ed25519
+*.keystore
+
+# Claude Code local (machine-specific permissions; keep skills/ tracked)
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
