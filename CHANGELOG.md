@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Migrated the terminal stack as a coordinated set: `ratatui` 0.29 → 0.30,
+  `crossterm` 0.28 → 0.29 (the version `ratatui` 0.30 re-exports), `tui-term` 0.2 → 0.3,
+  and `vt100` 0.15 → 0.16. These move together to resolve the `unicode-width` version
+  conflict that previously blocked the bump, and the upgrade clears the transitive `lru`
+  advisory (GHSA-rhfx-m35p-ff5j) by pulling `lru` 0.18 via `ratatui-core`.
+  The only source-level break was `vt100`'s `set_size` moving from `Parser` to `Screen`
+  (now called via `screen_mut().set_size(..)`).
+
 ## [0.1.0] - 2026-06-22
 
 ### Added
@@ -21,10 +30,6 @@ All notable changes to this project are documented here. The format is based on
   rendered live via `vt100` + `tui-term`; input forwarding in agent focus; tmux-backed
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
-
-### Notes
-- Pinned `tui-term 0.2.0` + `vt100 0.15.2` for `ratatui 0.29` compatibility (newer versions
-  pull a conflicting `unicode-width`). Revisit when moving to `ratatui 0.30`.
 
 [Unreleased]: https://github.com/isorensen/wtcc/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/isorensen/wtcc/releases/tag/v0.1.0

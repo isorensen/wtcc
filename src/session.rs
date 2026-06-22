@@ -94,7 +94,11 @@ impl Session {
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        self.parser.lock().unwrap().set_size(rows, cols);
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_size(rows, cols);
         Ok(())
     }
 
