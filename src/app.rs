@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 
 use crate::config::Config;
-use crate::session::SessionManager;
+use crate::session::{ActivityState, SessionManager};
 use crate::vcs::{GitGhProvider, VcsProvider, VcsStatus};
 use crate::worktree::{self, Worktree};
 
@@ -138,6 +138,14 @@ impl App {
 
     pub fn current_worktree(&self) -> Option<&Worktree> {
         self.selected_worktree.and_then(|i| self.worktrees.get(i))
+    }
+
+    /// Activity state of the agent for `branch`, mapped through the
+    /// `wtcc-<slug>` session name. `None` when no session has been spawned for
+    /// that worktree. Cheap enough to call per worktree each frame.
+    pub fn worktree_activity(&self, branch: &str) -> ActivityState {
+        self.session_manager
+            .activity(&SessionManager::session_name(branch))
     }
 
     pub fn select_repo(&mut self, index: usize) {
