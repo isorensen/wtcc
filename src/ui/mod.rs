@@ -42,7 +42,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         Overlay::None => {}
         Overlay::Palette { query, selected } => render_palette(query, *selected, area, buf),
         Overlay::Input { prompt, buffer } => render_input(prompt, buffer, area, buf),
-        Overlay::Confirm(confirm) => render_confirm(confirm, area, buf),
+        Overlay::Confirm(confirm) => render_confirm(app, confirm, area, buf),
     }
 }
 
@@ -153,7 +153,7 @@ fn render_input(prompt: &Prompt, buffer: &str, area: Rect, buf: &mut Buffer) {
     .render(inner, buf);
 }
 
-fn render_confirm(confirm: &Confirm, area: Rect, buf: &mut Buffer) {
+fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
     let rect = centered(60, 20, area);
     Clear.render(rect, buf);
 
@@ -164,6 +164,14 @@ fn render_confirm(confirm: &Confirm, area: Rect, buf: &mut Buffer) {
     let text = match confirm {
         Confirm::RemoveWorktree(path) => {
             format!("Remove worktree {}? (y/n)", path.display())
+        }
+        Confirm::RemoveRepo(index) => {
+            let name = app
+                .config
+                .repos
+                .get(*index)
+                .map_or("<unknown>", |r| r.name.as_str());
+            format!("Unregister repository {name}? (y/n)")
         }
     };
     Paragraph::new(text)

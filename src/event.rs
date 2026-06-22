@@ -94,6 +94,7 @@ fn handle_primary(app: &mut App, key: KeyEvent, ctrl: bool) {
         KeyCode::Char('a') => open_register_prompt(app),
         KeyCode::Char('n') => open_add_prompt(app),
         KeyCode::Char('d') => request_remove(app),
+        KeyCode::Char('D') => request_remove_repo(app),
         _ => {}
     }
 }
@@ -164,6 +165,7 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
             app.overlay = Overlay::None;
             match confirm {
                 Confirm::RemoveWorktree(path) => app.remove_worktree(&path),
+                Confirm::RemoveRepo(index) => app.remove_repository(index),
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.overlay = Overlay::None,
@@ -203,9 +205,17 @@ fn request_remove(app: &mut App) {
     }
 }
 
+fn request_remove_repo(app: &mut App) {
+    match app.selected_repo {
+        Some(index) => app.overlay = Overlay::Confirm(Confirm::RemoveRepo(index)),
+        None => app.status = Some("no repo selected".to_string()),
+    }
+}
+
 fn run_command(app: &mut App, cmd: Command) {
     match cmd {
         Command::AddRepo => open_register_prompt(app),
+        Command::RemoveRepo => request_remove_repo(app),
         Command::AddWorktree => open_add_prompt(app),
         Command::RemoveWorktree => request_remove(app),
         Command::SwitchRepo => app.cycle_repo(),
@@ -312,6 +322,18 @@ mod tests {
         let mut a = app();
         handle_key(&mut a, key(KeyCode::Char('d')));
         assert!(matches!(a.overlay, Overlay::Confirm(_)));
+        handle_key(&mut a, key(KeyCode::Char('n')));
+        assert_eq!(a.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn shift_d_requests_remove_repo_confirm() {
+        let mut a = app();
+        handle_key(&mut a, key(KeyCode::Char('D')));
+        assert!(matches!(
+            a.overlay,
+            Overlay::Confirm(Confirm::RemoveRepo(0))
+        ));
         handle_key(&mut a, key(KeyCode::Char('n')));
         assert_eq!(a.overlay, Overlay::None);
     }

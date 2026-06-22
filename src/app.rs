@@ -25,6 +25,7 @@ pub enum Prompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
     RemoveWorktree(PathBuf),
+    RemoveRepo(usize),
 }
 
 /// The active modal overlay, if any. Only one overlay is open at a time.
@@ -355,6 +356,35 @@ impl App {
         self.status = Some(format!("registered repo {name}"));
     }
 
+    /// Unregisters the repository at `index` from the config. This only edits
+    /// wtcc's config — it never deletes anything on disk. The removed entry is
+    /// restored if the persist step fails. On success, selection moves to the
+    /// previous neighbor (clamped), or `None` when the list is now empty, and
+    /// its worktrees are reloaded.
+    pub fn remove_repository(&mut self, index: usize) {
+        if index >= self.config.repos.len() {
+            return;
+        }
+        let removed = self.config.repos.remove(index);
+        let save = match &self.config_path {
+            Some(path) => self.config.save_to(path),
+            None => self.config.save(),
+        };
+        if let Err(e) = save {
+            self.config.repos.insert(index, removed);
+            self.status = Some(format!("save failed: {e}"));
+            return;
+        }
+        let name = removed.name;
+        if self.config.repos.is_empty() {
+            self.selected_repo = None;
+            self.refresh_worktrees();
+        } else {
+            self.select_repo(index.saturating_sub(1));
+        }
+        self.status = Some(format!("unregistered repo {name}"));
+    }
+
     pub fn remove_worktree(&mut self, path: &std::path::Path) {
         let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
             self.status = Some("no repo selected".to_string());
@@ -488,6 +518,96 @@ mod tests {
         app.next();
         app.prev();
         assert_eq!(app.selected_worktree, None);
+    }
+
+    /// Builds an App with two repos and a redirected `config_path`, bypassing
+    /// git by constructing fields directly (mirrors `app_with_fake_worktrees`).
+    fn app_with_two_repos(repo_a: PathBuf, repo_b: PathBuf, config_path: PathBuf) -> App {
+        App {
+            config: Config {
+                repos: vec![
+                    Repository {
+                        name: "repo-a".to_string(),
+                        path: repo_a,
+                    },
+                    Repository {
+                        name: "repo-b".to_string(),
+                        path: repo_b,
+                    },
+                ],
+                agent_cmd: "claude".to_string(),
+            },
+            selected_repo: Some(1),
+            worktrees: Vec::new(),
+            selected_worktree: None,
+            focus: Focus::Sidebar,
+            overlay: Overlay::None,
+            status: None,
+            should_quit: false,
+            session_manager: SessionManager::new(),
+            active_session: None,
+            config_path: Some(config_path),
+            vcs_status: HashMap::new(),
+            vcs_provider: Arc::new(GitGhProvider),
+            vcs_rx: None,
+        }
+    }
+
+    #[test]
+    fn remove_repository_unregisters_persists_and_reselects_neighbor() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("repo-a");
+        std::fs::create_dir(&repo_a).unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut app = app_with_two_repos(
+            repo_a.clone(),
+            PathBuf::from("/tmp/does-not-exist-repo-b"),
+            config_path.clone(),
+        );
+
+        app.remove_repository(1);
+
+        assert_eq!(app.config.repos.len(), 1);
+        assert_eq!(app.config.repos[0].name, "repo-a");
+        assert_eq!(app.selected_repo, Some(0));
+
+        let persisted = Config::load_from(&config_path).unwrap();
+        assert_eq!(persisted.repos.len(), 1);
+        assert_eq!(persisted.repos[0].name, "repo-a");
+
+        // Unregister must NOT delete the repo on disk.
+        assert!(repo_a.exists(), "on-disk repo dir must survive unregister");
+    }
+
+    #[test]
+    fn remove_repository_to_empty_clears_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut app = app_with_two_repos(
+            PathBuf::from("/tmp/does-not-exist-a"),
+            PathBuf::from("/tmp/does-not-exist-b"),
+            config_path,
+        );
+
+        app.remove_repository(1);
+        app.remove_repository(0);
+
+        assert!(app.config.repos.is_empty());
+        assert_eq!(app.selected_repo, None);
+        assert!(app.worktrees.is_empty());
+    }
+
+    #[test]
+    fn remove_repository_out_of_bounds_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut app = app_with_two_repos(
+            PathBuf::from("/tmp/a"),
+            PathBuf::from("/tmp/b"),
+            config_path,
+        );
+        app.remove_repository(9);
+        assert_eq!(app.config.repos.len(), 2);
     }
 
     #[test]

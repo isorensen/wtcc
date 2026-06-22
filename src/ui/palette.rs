@@ -4,6 +4,7 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     AddRepo,
+    RemoveRepo,
     AddWorktree,
     RemoveWorktree,
     SwitchRepo,
@@ -12,8 +13,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 6] = [
+    pub const ALL: [Command; 7] = [
         Command::AddRepo,
+        Command::RemoveRepo,
         Command::AddWorktree,
         Command::RemoveWorktree,
         Command::SwitchRepo,
@@ -24,6 +26,7 @@ impl Command {
     pub fn label(self) -> &'static str {
         match self {
             Command::AddRepo => "Add repository",
+            Command::RemoveRepo => "Remove repository",
             Command::AddWorktree => "Add worktree",
             Command::RemoveWorktree => "Remove worktree",
             Command::SwitchRepo => "Switch repo",
