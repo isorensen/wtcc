@@ -12,7 +12,7 @@ use tui_term::widget::{Cursor, PseudoTerminal};
 
 use crate::app::{App, Confirm, Focus, Overlay, Prompt};
 
-const AGENT_PLACEHOLDER: &str = "Agent pane — select a worktree (PTY coming next milestone)";
+const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a repository";
 const SIDEBAR_WIDTH: u16 = 34;
 const STATUS_HEIGHT: u16 = 1;
 
@@ -184,15 +184,6 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
 }
 
 fn render_help(area: Rect, buf: &mut Buffer) {
-    let rect = centered(60, 60, area);
-    Clear.render(rect, buf);
-
-    let block = Block::default()
-        .title(" help — keybindings ")
-        .borders(Borders::ALL);
-    let inner = block.inner(rect);
-    block.render(rect, buf);
-
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(ratatui::style::Color::Cyan);
 
@@ -210,7 +201,29 @@ fn render_help(area: Rect, buf: &mut Buffer) {
     push_group("Sidebar", crate::event::HELP_SIDEBAR);
     push_group("Agent", crate::event::HELP_AGENT);
 
+    // Size the box to its content (+2 for the border) so no section is clipped
+    // on short terminals, clamped to the available area.
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = (area.width * 6 / 10).clamp(40, area.width);
+    let rect = centered_sized(width, height, area);
+    Clear.render(rect, buf);
+
+    let block = Block::default()
+        .title(" help — keybindings ")
+        .borders(Borders::ALL);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
     Paragraph::new(lines).render(inner, buf);
+}
+
+/// Centers a fixed-size rect within `area`, clamping to its bounds.
+fn centered_sized(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    Rect::new(x, y, w, h)
 }
 
 fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -283,8 +296,8 @@ mod tests {
         assert!(text.contains("main"), "expected worktree branch in output");
         assert!(text.contains("quit"), "expected keybind hint in output");
         assert!(
-            text.contains("Agent pane"),
-            "expected agent placeholder in output"
+            text.contains("register a repository"),
+            "expected onboarding hint in agent placeholder"
         );
     }
 
@@ -325,7 +338,7 @@ mod tests {
             "expected agent pane title in output"
         );
         assert!(
-            !text.contains("Agent pane"),
+            !text.contains("register a repository"),
             "placeholder must not show once a session is active"
         );
     }
@@ -337,8 +350,7 @@ mod tests {
         let text = rendered_text(&app);
         assert!(text.contains("keybindings"), "expected help title");
         assert!(text.contains("Sidebar"), "expected Sidebar heading");
-        assert!(text.contains("Agent"), "expected Agent heading");
-        assert!(text.contains("Tab"), "expected a Tab binding");
+        assert!(text.contains("command palette"), "expected a help binding");
         assert!(text.contains("quit"), "expected a quit binding");
     }
 
