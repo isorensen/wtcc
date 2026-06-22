@@ -32,6 +32,7 @@ result is lighter, runs in any terminal, and needs no GTK/Wayland-specific stack
 | `j` / `k` (or arrows) | Move selection |
 | `Tab` | Focus the agent pane |
 | `a` | Register a repository |
+| `D` | Unregister the selected repository (config only; nothing on disk is deleted) |
 | `n` | Add a worktree |
 | `d` | Remove the selected worktree |
 | `r` | Refresh worktrees |
