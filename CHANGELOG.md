@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-22
+
 ### Added
 - Project scaffolding: design spec, MIT license, README, `SECURITY.md`.
 - Security baseline tailored to a Rust CLI: `gitleaks` pre-commit, secret `.gitignore`
@@ -24,4 +26,5 @@ All notable changes to this project are documented here. The format is based on
 - Pinned `tui-term 0.2.0` + `vt100 0.15.2` for `ratatui 0.29` compatibility (newer versions
   pull a conflicting `unicode-width`). Revisit when moving to `ratatui 0.30`.
 
-[Unreleased]: https://github.com/isorensen/wtcc/commits/main
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/isorensen/wtcc/releases/tag/v0.1.0
