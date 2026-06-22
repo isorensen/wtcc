@@ -6,14 +6,28 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-22
+
+### Added
+- In-app repository registration: the `a` keybind and the "Add repository" palette
+  command register a repo from inside the TUI, with `~`/relative path expansion,
+  canonicalized duplicate detection, and persistence (#7).
+- Per-worktree git + PR/CI status badges in the sidebar, fetched off the UI thread
+  via `git` and `gh` (failures degrade to no badge, never a user error) (#6).
+- A visible cursor in the agent pane when it is focused (honoring the program's own
+  DECTCEM hidden state) (#8).
+- ADR 0001 documenting the TUI/PTY (`vt100` + `tui-term`) terminal-backend decision (#9).
+- Smoke test: `scripts/smoke-test.sh` (hands-free launch/render/quit check) plus a
+  manual checklist in `docs/testing/smoke-test.md` (#11).
+- CodeQL code scanning for Rust in CI (#10).
+
 ### Changed
 - Migrated the terminal stack as a coordinated set: `ratatui` 0.29 → 0.30,
   `crossterm` 0.28 → 0.29 (the version `ratatui` 0.30 re-exports), `tui-term` 0.2 → 0.3,
   and `vt100` 0.15 → 0.16. These move together to resolve the `unicode-width` version
   conflict that previously blocked the bump, and the upgrade clears the transitive `lru`
-  advisory (GHSA-rhfx-m35p-ff5j) by pulling `lru` 0.18 via `ratatui-core`.
-  The only source-level break was `vt100`'s `set_size` moving from `Parser` to `Screen`
-  (now called via `screen_mut().set_size(..)`).
+  advisory (GHSA-rhfx-m35p-ff5j) by pulling `lru` 0.18 via `ratatui-core`. The only
+  source-level break was `vt100`'s `set_size` moving from `Parser` to `Screen` (#12).
 
 ## [0.1.0] - 2026-06-22
 
@@ -31,5 +45,6 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/isorensen/wtcc/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/isorensen/wtcc/releases/tag/v0.1.0

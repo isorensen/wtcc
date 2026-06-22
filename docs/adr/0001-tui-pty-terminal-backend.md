@@ -42,6 +42,10 @@ isolation breaks the build, so Dependabot is configured to ignore minor/major bu
 `ratatui`/`crossterm`/`tui-term`/`vt100`. The coordinated upgrade to `ratatui 0.30` is tracked in
 issue #12.
 
+> **Update (v0.2.0, #12):** the coordinated upgrade landed — `ratatui 0.30` / `crossterm 0.29` /
+> `tui-term 0.3` / `vt100 0.16`. The `unicode-width` conflict is resolved, the `lru` advisory is
+> cleared, and the Dependabot ignore block has been removed. The pin above is now historical.
+
 ## Consequences
 
 **Positive**
