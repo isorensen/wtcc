@@ -42,6 +42,7 @@ pub enum Overlay {
         buffer: String,
     },
     Confirm(Confirm),
+    Help,
 }
 
 pub struct App {
