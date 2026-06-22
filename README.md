@@ -37,6 +37,7 @@ result is lighter, runs in any terminal, and needs no GTK/Wayland-specific stack
 | `d` | Remove the selected worktree |
 | `r` | Refresh worktrees |
 | `:` / `Ctrl-P` | Command palette |
+| `?` | Help overlay (lists all keybindings) |
 | `q` / `Ctrl-Q` | Quit |
 
 **Agent focus** — keystrokes are forwarded to the running agent.

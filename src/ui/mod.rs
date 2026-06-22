@@ -43,6 +43,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         Overlay::Palette { query, selected } => render_palette(query, *selected, area, buf),
         Overlay::Input { prompt, buffer } => render_input(prompt, buffer, area, buf),
         Overlay::Confirm(confirm) => render_confirm(app, confirm, area, buf),
+        Overlay::Help => render_help(area, buf),
     }
 }
 
@@ -179,6 +180,36 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
         .render(inner, buf);
 }
 
+fn render_help(area: Rect, buf: &mut Buffer) {
+    let rect = centered(60, 60, area);
+    Clear.render(rect, buf);
+
+    let block = Block::default()
+        .title(" help — keybindings ")
+        .borders(Borders::ALL);
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let key_style = Style::default().fg(ratatui::style::Color::Cyan);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut push_group = |heading: &str, bindings: &[(&str, &str)]| {
+        lines.push(Line::styled(heading.to_string(), bold));
+        for (keys, action) in bindings {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {keys:<12}"), key_style),
+                Span::raw(action.to_string()),
+            ]));
+        }
+        lines.push(Line::raw(""));
+    };
+    push_group("Sidebar", crate::event::HELP_SIDEBAR);
+    push_group("Agent", crate::event::HELP_AGENT);
+
+    Paragraph::new(lines).render(inner, buf);
+}
+
 fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -294,6 +325,18 @@ mod tests {
             !text.contains("Agent pane"),
             "placeholder must not show once a session is active"
         );
+    }
+
+    #[test]
+    fn renders_help_overlay() {
+        let mut app = app_for_render();
+        app.overlay = Overlay::Help;
+        let text = rendered_text(&app);
+        assert!(text.contains("keybindings"), "expected help title");
+        assert!(text.contains("Sidebar"), "expected Sidebar heading");
+        assert!(text.contains("Agent"), "expected Agent heading");
+        assert!(text.contains("Tab"), "expected a Tab binding");
+        assert!(text.contains("quit"), "expected a quit binding");
     }
 
     #[test]

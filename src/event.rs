@@ -3,6 +3,29 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::{App, Confirm, Focus, Overlay, Prompt};
 use crate::ui::palette::{self, Command};
 
+/// Keybindings shown in the `?` help overlay, grouped by focus. Kept next to
+/// the keymap (`handle_primary`/`handle_agent`) so a binding change here is an
+/// obvious prompt to update the help — there is no reflection, just one table.
+pub const HELP_SIDEBAR: &[(&str, &str)] = &[
+    ("j/k", "move selection"),
+    ("Tab", "focus agent"),
+    ("a", "register repo"),
+    ("D", "unregister repo"),
+    ("n", "add worktree"),
+    ("d", "remove worktree"),
+    ("r", "refresh"),
+    (": / Ctrl-P", "command palette"),
+    ("?", "help"),
+    ("q / Ctrl-Q", "quit"),
+];
+
+pub const HELP_AGENT: &[(&str, &str)] = &[
+    ("(keys)", "forwarded to the agent"),
+    ("Ctrl-O", "back to sidebar"),
+    ("Ctrl-C", "forwarded to the agent"),
+    ("Ctrl-Q", "quit"),
+];
+
 /// Applies a key event to the app, dispatching to the active overlay first and
 /// falling back to the primary keymap. Pure state transition: no terminal I/O.
 ///
@@ -39,6 +62,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Overlay::Palette { .. } => handle_palette(app, key),
         Overlay::Input { .. } => handle_input(app, key),
         Overlay::Confirm(_) => handle_confirm(app, key),
+        // Any key dismisses the help overlay; it never leaks to the panes.
+        Overlay::Help => app.overlay = Overlay::None,
     }
 }
 
@@ -95,6 +120,7 @@ fn handle_primary(app: &mut App, key: KeyEvent, ctrl: bool) {
         KeyCode::Char('n') => open_add_prompt(app),
         KeyCode::Char('d') => request_remove(app),
         KeyCode::Char('D') => request_remove_repo(app),
+        KeyCode::Char('?') => app.overlay = Overlay::Help,
         _ => {}
     }
 }
@@ -377,6 +403,40 @@ mod tests {
             KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
         );
         assert_eq!(a.focus, crate::app::Focus::Sidebar);
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_sidebar() {
+        let mut a = app();
+        handle_key(&mut a, key(KeyCode::Char('?')));
+        assert_eq!(a.overlay, Overlay::Help);
+    }
+
+    #[test]
+    fn any_key_closes_help_without_moving_selection() {
+        let mut a = app();
+        a.worktrees.push(Worktree {
+            path: PathBuf::from("/repo/feat"),
+            branch: "feat".to_string(),
+            head: "def".to_string(),
+            is_bare: false,
+            is_detached: false,
+        });
+        a.selected_worktree = Some(0);
+        a.overlay = Overlay::Help;
+
+        // `j` would normally move the selection, but Help swallows it.
+        handle_key(&mut a, key(KeyCode::Char('j')));
+        assert_eq!(a.overlay, Overlay::None);
+        assert_eq!(a.selected_worktree, Some(0));
+    }
+
+    #[test]
+    fn esc_closes_help() {
+        let mut a = app();
+        a.overlay = Overlay::Help;
+        handle_key(&mut a, key(KeyCode::Esc));
+        assert_eq!(a.overlay, Overlay::None);
     }
 
     #[test]
