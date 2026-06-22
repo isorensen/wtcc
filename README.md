@@ -25,7 +25,7 @@ git/PR status — beside the live agent terminal for the selected worktree:
 │                                ││Running tests…  12 passed                               │
 │                                ││                                                        │
 └────────────────────────────────┘└────────────────────────────────────────────────────────┘
-j/k move  Tab agent  n/d worktree  a/D repo  r refresh  : palette  ? help  q/Ctrl-Q quit
+j/k move  Tab agent  n/d worktree  a/D repo  R restart  r refresh  : palette  ? help  q quit
 ```
 
 Press `?` for the full keybinding overlay. These frames are reproducible with
@@ -60,6 +60,7 @@ result is lighter, runs in any terminal, and needs no GTK/Wayland-specific stack
 | `D` | Unregister the selected repository (config only; nothing on disk is deleted) |
 | `n` | Add a worktree |
 | `d` | Remove the selected worktree |
+| `R` | Restart the selected worktree's agent (kills its tmux session; a fresh agent respawns) |
 | `r` | Refresh worktrees |
 | `:` / `Ctrl-P` | Command palette |
 | `?` | Help overlay (lists all keybindings) |

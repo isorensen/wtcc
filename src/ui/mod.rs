@@ -174,6 +174,9 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
                 .map_or("<unknown>", |r| r.name.as_str());
             format!("Unregister repository {name}? (y/n)")
         }
+        Confirm::RestartAgent(branch) => {
+            format!("Restart agent for {branch}? (y/n)")
+        }
     };
     Paragraph::new(text)
         .wrap(Wrap { trim: true })

@@ -200,6 +200,22 @@ impl SessionManager {
         self.sessions.get(name)
     }
 
+    /// Kills the agent for the session named `name`: drops the local `Session`
+    /// (its `Drop` detaches the PTY attach child) and best-effort kills the
+    /// underlying tmux session so a fresh agent is spawned on reattach. `name` is
+    /// already slugified (`wtcc-<slug>`); it is passed argv-only, never via a
+    /// shell. A missing tmux session reports an error that is intentionally
+    /// ignored — the manager-level removal is what matters and only touches the
+    /// named session, never any other worktree's.
+    pub fn kill(&mut self, name: &str) {
+        self.sessions.remove(name);
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     /// Activity state for the session named `name`: `None` when no such session
     /// exists, otherwise classified from its output cadence. Cheap — just reads
     /// an `Instant` under a lock.
@@ -325,6 +341,35 @@ mod tests {
             "idle should grow once the PTY goes quiet"
         );
         assert!(session.idle_for() >= WORKING_WINDOW);
+    }
+
+    #[test]
+    fn kill_removes_named_session_and_leaves_others() {
+        let mut mgr = SessionManager::new();
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        mgr.insert_spawned("wtcc-a", a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        mgr.insert_spawned("wtcc-b", b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+
+        mgr.kill("wtcc-a");
+
+        assert!(mgr.get("wtcc-a").is_none(), "killed session must be gone");
+        assert!(
+            mgr.get("wtcc-b").is_some(),
+            "other worktree's session must survive"
+        );
+    }
+
+    #[test]
+    fn kill_unknown_session_is_noop() {
+        let mut mgr = SessionManager::new();
+        // No local session and tmux may report no session — must not panic.
+        mgr.kill("wtcc-does-not-exist");
+        assert!(mgr.get("wtcc-does-not-exist").is_none());
     }
 
     #[test]

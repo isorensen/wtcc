@@ -7,17 +7,19 @@ pub enum Command {
     RemoveRepo,
     AddWorktree,
     RemoveWorktree,
+    RestartAgent,
     SwitchRepo,
     Refresh,
     Quit,
 }
 
 impl Command {
-    pub const ALL: [Command; 7] = [
+    pub const ALL: [Command; 8] = [
         Command::AddRepo,
         Command::RemoveRepo,
         Command::AddWorktree,
         Command::RemoveWorktree,
+        Command::RestartAgent,
         Command::SwitchRepo,
         Command::Refresh,
         Command::Quit,
@@ -29,6 +31,7 @@ impl Command {
             Command::RemoveRepo => "Remove repository",
             Command::AddWorktree => "Add worktree",
             Command::RemoveWorktree => "Remove worktree",
+            Command::RestartAgent => "Restart agent",
             Command::SwitchRepo => "Switch repo",
             Command::Refresh => "Refresh",
             Command::Quit => "Quit",

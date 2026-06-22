@@ -26,6 +26,9 @@ pub enum Prompt {
 pub enum Confirm {
     RemoveWorktree(PathBuf),
     RemoveRepo(usize),
+    /// Restart the agent for the named branch (kill its tmux session; a fresh
+    /// agent respawns on the next frame). The branch is shown in the prompt.
+    RestartAgent(String),
 }
 
 /// The active modal overlay, if any. Only one overlay is open at a time.
@@ -407,6 +410,20 @@ impl App {
             Err(e) => self.status = Some(format!("remove failed: {e}")),
         }
     }
+
+    /// Restarts the agent for `branch`: kills its `wtcc-<slug>` tmux session and
+    /// drops the local `Session`, then clears `active_session` if it pointed at
+    /// that session so the run loop's `ensure_active_session` respawns a fresh
+    /// agent next frame. Touches only the named session, never other worktrees'.
+    /// Works whether or not a live local session exists.
+    pub fn restart_agent(&mut self, branch: &str) {
+        let name = SessionManager::session_name(branch);
+        self.session_manager.kill(&name);
+        if self.active_session.as_deref() == Some(name.as_str()) {
+            self.active_session = None;
+        }
+        self.status = Some(format!("restarting agent for {branch}"));
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +512,45 @@ mod tests {
         };
         app.selected_worktree = Some(0);
         app
+    }
+
+    #[test]
+    fn restart_agent_drops_named_session_clears_active_and_keeps_others() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees();
+        let main = SessionManager::session_name("main");
+        let feat = SessionManager::session_name("feat");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        app.session_manager
+            .insert_spawned(&main, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&feat, b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(main.clone());
+
+        app.restart_agent("main");
+
+        assert!(app.session_manager.get(&main).is_none());
+        assert!(
+            app.session_manager.get(&feat).is_some(),
+            "other worktree's session must survive a restart"
+        );
+        assert_eq!(app.active_session, None);
+        assert_eq!(app.status.as_deref(), Some("restarting agent for main"));
+    }
+
+    #[test]
+    fn restart_agent_without_live_session_is_safe() {
+        let mut app = app_with_fake_worktrees();
+        // No local session, active_session unset: must not panic, sets status.
+        app.restart_agent("main");
+        assert_eq!(app.status.as_deref(), Some("restarting agent for main"));
+        assert_eq!(app.active_session, None);
     }
 
     #[test]
