@@ -155,6 +155,23 @@ impl SessionManager {
             let _ = s.resize(rows, cols);
         }
     }
+
+    /// Spawns a session from an arbitrary command and registers it under `name`.
+    /// Test-only: lets UI tests build an active session without depending on
+    /// `tmux` being installed on the host.
+    #[cfg(test)]
+    pub(crate) fn insert_spawned(
+        &mut self,
+        name: &str,
+        cmd: CommandBuilder,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+    ) -> anyhow::Result<()> {
+        let session = Session::spawn_with_command(cmd, cwd, rows, cols)?;
+        self.sessions.insert(name.to_string(), session);
+        Ok(())
+    }
 }
 
 impl Default for SessionManager {

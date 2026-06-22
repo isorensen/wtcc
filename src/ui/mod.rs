@@ -8,9 +8,9 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
-use tui_term::widget::PseudoTerminal;
+use tui_term::widget::{Cursor, PseudoTerminal};
 
-use crate::app::{App, Confirm, Overlay, Prompt};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt};
 
 const AGENT_PLACEHOLDER: &str = "Agent pane — select a worktree (PTY coming next milestone)";
 const SIDEBAR_WIDTH: u16 = 34;
@@ -59,8 +59,14 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
     match session {
         Some(s) => {
             let parser = s.parser().lock().unwrap();
-            PseudoTerminal::new(parser.screen())
+            let screen = parser.screen();
+            // The widget only draws the cursor when the screen has not hidden it
+            // (DECTCEM) AND `Cursor::show` is set, so gating on focus alone keeps
+            // the screen's own hidden state intact.
+            let cursor = Cursor::default().visibility(agent_cursor_shown(app.focus));
+            PseudoTerminal::new(screen)
                 .block(block)
+                .cursor(cursor)
                 .render(area, buf);
         }
         None => {
@@ -71,6 +77,13 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
                 .render(area, buf);
         }
     }
+}
+
+/// Whether the agent pane should request a visible terminal cursor. Only the
+/// focused agent pane shows the caret; the screen's own DECTCEM hidden state is
+/// still honored downstream by `tui-term`.
+fn agent_cursor_shown(focus: Focus) -> bool {
+    focus == Focus::Agent
 }
 
 /// Inner (rows, cols) of the agent pane given the full frame area, matching `render`'s layout.
@@ -239,6 +252,40 @@ mod tests {
         app.status = Some("something happened".to_string());
         let text = rendered_text(&app);
         assert!(text.contains("something happened"));
+    }
+
+    #[test]
+    fn agent_cursor_shown_only_when_agent_focused() {
+        assert!(agent_cursor_shown(Focus::Agent));
+        assert!(!agent_cursor_shown(Focus::Sidebar));
+    }
+
+    #[test]
+    fn renders_agent_pane_with_active_session_and_focus_without_panic() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_for_render();
+        let name = "wtcc-test-cursor";
+        let mut cmd = CommandBuilder::new("printf");
+        cmd.args(["hello-agent"]);
+        app.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 24, 80)
+            .expect("spawn test session");
+        app.active_session = Some(name.to_string());
+        app.focus = Focus::Agent;
+
+        // Must render the bordered pane (title) without panicking. The cursor
+        // itself can't be asserted reliably in a buffer snapshot, but a clean
+        // render with cursor visibility enabled is the regression guard.
+        let text = rendered_text(&app);
+        assert!(
+            text.contains("agent"),
+            "expected agent pane title in output"
+        );
+        assert!(
+            !text.contains("Agent pane"),
+            "placeholder must not show once a session is active"
+        );
     }
 
     #[test]
