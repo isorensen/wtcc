@@ -128,19 +128,24 @@ pub struct Session {
 }
 
 impl Session {
+    /// Spawns a named tmux/PTY surface. `command` is the agent command for an
+    /// agent tab, or `None` for a shell tab — in which case tmux launches its
+    /// default shell (the user's `$SHELL`, falling back to `/bin/sh`). When set,
+    /// it is split on whitespace and passed as argv (NOT through a shell — no
+    /// shell-metacharacter interpretation).
     pub fn spawn(
         session_name: &str,
-        agent_cmd: &str,
+        command: Option<&str>,
         cwd: &Path,
         rows: u16,
         cols: u16,
     ) -> anyhow::Result<Session> {
         let mut cmd = CommandBuilder::new("tmux");
         cmd.args(["new-session", "-A", "-s", session_name]);
-        // agent_cmd is split on whitespace and passed as argv (NOT through a
-        // shell — no shell-metacharacter interpretation).
-        for token in agent_cmd.split_whitespace() {
-            cmd.arg(token);
+        if let Some(command) = command {
+            for token in command.split_whitespace() {
+                cmd.arg(token);
+            }
         }
         Self::spawn_with_command(cmd, cwd, rows, cols)
     }
@@ -260,6 +265,9 @@ impl SessionManager {
         format!("wtcc-{}", crate::worktree::slugify(branch))
     }
 
+    /// Branch-keyed agent session wrapper: maps `branch` to `wtcc-<slug>` and
+    /// reuses-or-spawns it via [`ensure_named`](Self::ensure_named) with the agent
+    /// command. Tab 0 (the agent) reattaches exactly as before tabs existed.
     pub fn ensure(
         &mut self,
         branch: &str,
@@ -269,11 +277,26 @@ impl SessionManager {
         cols: u16,
     ) -> anyhow::Result<&Session> {
         let name = Self::session_name(branch);
-        if !self.sessions.contains_key(&name) {
-            let s = Session::spawn(&name, agent_cmd, cwd, rows, cols)?;
-            self.sessions.insert(name.clone(), s);
+        self.ensure_named(&name, cwd, Some(agent_cmd), rows, cols)
+    }
+
+    /// The named-session primitive behind every surface (agent and shell tabs):
+    /// reuses the live session registered under `name`, or spawns one running
+    /// `command` (`None` => default shell) and registers it. Idempotent — a second
+    /// call for a live name never respawns or errors.
+    pub fn ensure_named(
+        &mut self,
+        name: &str,
+        cwd: &Path,
+        command: Option<&str>,
+        rows: u16,
+        cols: u16,
+    ) -> anyhow::Result<&Session> {
+        if !self.sessions.contains_key(name) {
+            let s = Session::spawn(name, command, cwd, rows, cols)?;
+            self.sessions.insert(name.to_string(), s);
         }
-        Ok(self.sessions.get(&name).unwrap())
+        Ok(self.sessions.get(name).unwrap())
     }
 
     pub fn get(&self, name: &str) -> Option<&Session> {
@@ -696,6 +719,56 @@ mod tests {
         assert!(
             durations.iter().any(|(n, _)| n == "wtcc-x"),
             "idle_durations must report each live session by name"
+        );
+    }
+
+    // --- issue #48: named-session primitive for per-worktree tabs ------------
+    //
+    // TDD RED: tabs need MULTIPLE sessions per worktree, so `Session::spawn` is
+    // generalized to `command: Option<&str>` (None => default shell) and
+    // `SessionManager::ensure_named(name, cwd, command, rows, cols)` becomes the
+    // named-session primitive that today's `ensure(branch, ...)` wraps. The real
+    // spawn stays thin and tmux-dependent, so these stay CI-safe: the signature
+    // is pinned with a fn-pointer (no spawn), and idempotency is checked only
+    // when a spawn actually succeeded (tmux may be absent in CI).
+
+    #[test]
+    fn spawn_signature_takes_an_optional_command() {
+        // None => `tmux new-session -A -s <name>` default shell; Some => an
+        // argv-split command. Pinned at compile time with no side effects.
+        let _spawn: fn(&str, Option<&str>, &Path, u16, u16) -> anyhow::Result<Session> =
+            Session::spawn;
+    }
+
+    #[test]
+    fn ensure_named_registers_under_name_and_is_idempotent() {
+        let mut mgr = SessionManager::new();
+        let name = "wtcc-issue48-ensure-named-t1";
+        // tmux may be unavailable in CI: tolerate a spawn error, pin behavior
+        // only when the spawn actually succeeded.
+        if mgr
+            .ensure_named(name, &std::env::temp_dir(), Some("printf hi"), 24, 80)
+            .is_ok()
+        {
+            assert!(mgr.get(name).is_some(), "ensure_named registers under name");
+            // A second call must reuse the live session, never respawn or error.
+            assert!(
+                mgr.ensure_named(name, &std::env::temp_dir(), Some("printf hi"), 24, 80)
+                    .is_ok(),
+                "ensure_named is idempotent for an existing name"
+            );
+            assert!(mgr.get(name).is_some());
+            mgr.kill(name); // best-effort cleanup of the real tmux session
+        }
+    }
+
+    #[test]
+    fn ensure_still_maps_branch_to_the_slug_session_name() {
+        // The branch-keyed wrapper keeps producing `wtcc-<slug>` so tab 0 (agent)
+        // reattaches exactly as before.
+        assert_eq!(
+            SessionManager::session_name("Feature/Big Thing"),
+            "wtcc-feature-big-thing"
         );
     }
 }

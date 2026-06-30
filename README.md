@@ -110,6 +110,8 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `A` | Switch the worktree's agent (from configured presets) |
 | `R` | Restart the selected worktree's agent (kills its tmux session; a fresh agent respawns) |
 | `r` | Refresh worktrees |
+| `t` / `w` | New shell tab / close the active shell tab |
+| `]` / `[` | Next / previous tab |
 | `g` | Jump to the next agent needing attention |
 | `o` | Open the worktree's PR in the browser |
 | `m` | Merge the worktree's PR (confirm first) |

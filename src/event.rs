@@ -408,6 +408,10 @@ fn run_action(app: &mut App, action: Action) {
         Action::ClosePr => request_close_pr(app),
         Action::ToggleArchive => toggle_archive(app),
         Action::ShowArchived => app.show_archived = !app.show_archived,
+        Action::NewTab => app.new_shell_tab(),
+        Action::CloseTab => app.close_tab(),
+        Action::NextTab => app.next_tab(),
+        Action::PrevTab => app.prev_tab(),
         Action::Quit => app.should_quit = true,
     }
 }

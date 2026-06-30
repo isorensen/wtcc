@@ -15,6 +15,8 @@ use crate::app::{App, Confirm, Focus, Overlay, Prompt};
 const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a repository";
 pub(crate) const SIDEBAR_WIDTH: u16 = 34;
 pub(crate) const STATUS_HEIGHT: u16 = 1;
+/// Rows reserved for the per-worktree tab strip at the top of the agent pane.
+pub(crate) const TAB_BAR_HEIGHT: u16 = 1;
 
 /// Border style for a pane given whether it currently has focus. The focused
 /// pane gets a distinct, bold border (`theme.border_focus`) as the focus cue;
@@ -69,6 +71,23 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
         .title(title)
         .borders(Borders::ALL)
         .border_style(pane_border_style(&app.theme, app.focus == Focus::Agent));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    // Reserve the top row of the pane for the tab strip; the active tab's surface
+    // fills the rest.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(TAB_BAR_HEIGHT), Constraint::Min(1)])
+        .split(inner);
+    let strip_area = rows[0];
+    let surface_area = rows[1];
+
+    let layout = app
+        .current_slug()
+        .and_then(|s| app.layouts.get(&s).cloned());
+    render_tab_strip(app, layout.as_ref(), strip_area, buf);
+
     let session = app
         .active_session
         .as_deref()
@@ -82,18 +101,48 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
             // the screen's own hidden state intact.
             let cursor = Cursor::default().visibility(agent_cursor_shown(app.focus));
             PseudoTerminal::new(screen)
-                .block(block)
                 .cursor(cursor)
-                .render(area, buf);
+                .render(surface_area, buf);
         }
         None => {
             Paragraph::new(AGENT_PLACEHOLDER)
-                .block(block)
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true })
-                .render(area, buf);
+                .render(surface_area, buf);
         }
     }
+}
+
+/// Draws the compact tab strip: each tab's title, the active one highlighted via
+/// the theme accent (reversed/bold), inactive ones dimmed. Hidden (renders
+/// nothing) when the worktree has no layout yet.
+fn render_tab_strip(
+    app: &App,
+    layout: Option<&crate::layout::WorktreeLayout>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(layout) = layout else {
+        return;
+    };
+    let active_style = Style::default()
+        .fg(app.theme.accent)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let inactive_style = Style::default().fg(app.theme.hint);
+    let spans: Vec<Span> = layout
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let style = if i == layout.active {
+                active_style
+            } else {
+                inactive_style
+            };
+            Span::styled(format!(" {} ", tab.title), style)
+        })
+        .collect();
+    Paragraph::new(Line::from(spans)).render(area, buf);
 }
 
 /// Whether the agent pane should request a visible terminal cursor. Only the
@@ -108,7 +157,7 @@ pub fn agent_pane_size(area: Rect) -> (u16, u16) {
     let body_height = area.height.saturating_sub(STATUS_HEIGHT);
     let pane_width = area.width.saturating_sub(SIDEBAR_WIDTH);
     // subtract the bordered Block (1 cell each side)
-    let rows = body_height.saturating_sub(2);
+    let rows = body_height.saturating_sub(2).saturating_sub(TAB_BAR_HEIGHT);
     let cols = pane_width.saturating_sub(2);
     (rows.max(1), cols.max(1))
 }
@@ -441,5 +490,105 @@ mod tests {
         let text = rendered_text(&app);
         assert!(text.contains("command palette"));
         assert!(text.contains("Add worktree"));
+    }
+
+    // --- issue #48: per-worktree tab strip + agent_pane_size accounting -------
+    //
+    // TDD RED: `render_agent` draws a one-row tab strip (every tab title, the
+    // active one highlighted via the theme) above the active tab's
+    // `PseudoTerminal`, and `agent_pane_size` subtracts `TAB_BAR_HEIGHT` so the
+    // PTY size equals the drawn pane. The strip is driven by the current
+    // worktree's `WorktreeLayout` (titles "agent", "shell 1", ...).
+
+    /// First column where `needle` starts in row `y`, comparing cell symbols so
+    /// the index is a true terminal column (UTF-8 box-drawing dividers would
+    /// otherwise skew a byte-based `str::find`).
+    fn col_of(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
+        let width = buf.area.width;
+        let cells: Vec<String> = (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        let want: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+        if want.len() > cells.len() {
+            return None;
+        }
+        (0..=cells.len() - want.len()).find_map(|start| {
+            if cells[start..start + want.len()] == want[..] {
+                Some(start as u16)
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn agent_pane_size_reserves_a_row_for_the_tab_strip() {
+        let area = Rect::new(0, 0, 100, 24);
+        let (rows, cols) = agent_pane_size(area);
+        let body = 24u16 - STATUS_HEIGHT;
+        assert_eq!(
+            rows,
+            body - 2 - TAB_BAR_HEIGHT,
+            "the PTY height must exclude the borders AND the one-row tab strip"
+        );
+        assert_eq!(cols, 100 - SIDEBAR_WIDTH - 2);
+    }
+
+    #[test]
+    fn tab_strip_renders_every_tab_title() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_for_render(); // worktree branch "main"
+        app.new_shell_tab(); // main layout: [agent, shell 1], active shell
+        let shell = "wtcc-main-t1";
+        let mut cmd = CommandBuilder::new("printf");
+        cmd.args(["hi"]);
+        app.session_manager
+            .insert_spawned(shell, cmd, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(shell.to_string());
+
+        let text = rendered_text(&app);
+        assert!(
+            text.contains("agent"),
+            "the agent tab title shows in the strip"
+        );
+        assert!(
+            text.contains("shell 1"),
+            "the shell tab title shows in the strip"
+        );
+    }
+
+    #[test]
+    fn tab_strip_highlights_the_active_tab() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_for_render();
+        app.new_shell_tab(); // active = shell 1 (index 1)
+        let shell = "wtcc-main-t1";
+        let mut cmd = CommandBuilder::new("printf");
+        cmd.args(["hi"]);
+        app.session_manager
+            .insert_spawned(shell, cmd, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(shell.to_string());
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // The strip row is the one carrying the shell title.
+        let strip_y = (0..buffer.area.height)
+            .find(|&y| col_of(&buffer, y, "shell 1").is_some())
+            .expect("a tab strip row with the shell title must render");
+        let active_x = col_of(&buffer, strip_y, "shell 1").unwrap();
+        let inactive_x = col_of(&buffer, strip_y, "agent").unwrap();
+
+        assert_ne!(
+            buffer[(active_x, strip_y)].style(),
+            buffer[(inactive_x, strip_y)].style(),
+            "the active tab title must be highlighted differently from inactive titles"
+        );
     }
 }

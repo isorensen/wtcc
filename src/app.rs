@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::layout::{TabKind, WorktreeLayout};
 use crate::session::{ActivityState, AttentionTracker, SessionManager};
 use crate::theme::Theme;
 use crate::vcs::{GitGhProvider, VcsProvider, VcsStatus};
@@ -147,6 +148,10 @@ pub struct App {
     pub should_quit: bool,
     pub session_manager: SessionManager,
     pub active_session: Option<String>,
+    /// Per-worktree tab layouts (issue #48), keyed by branch slug. In-memory only
+    /// (KNOWN GAP: not persisted, so shell tabs are lost on restart; the agent tab
+    /// persists via its named tmux session). Lazily created on first use.
+    pub layouts: HashMap<String, WorktreeLayout>,
     /// Edge-triggered tracker that flags agents which have gone quiet and need
     /// the user's input. Polled once per frame from the run loop.
     pub attention: AttentionTracker,
@@ -216,6 +221,7 @@ impl App {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
             vcs_status: HashMap::new(),
@@ -395,8 +401,78 @@ impl App {
         }
     }
 
-    /// Lazily spawns (or reuses) the agent session for the current worktree and
-    /// records its name in `active_session`. Spawn errors land in `status`.
+    /// Branch slug of the selected worktree, slugified so untrusted branch names
+    /// are safe to use as layout keys and session-name stems.
+    pub fn current_slug(&self) -> Option<String> {
+        self.current_worktree()
+            .map(|w| crate::worktree::slugify(&w.branch))
+    }
+
+    /// Returns the current worktree's layout, creating an agent-only one if none
+    /// exists yet. Internal helper for the tab commands.
+    fn layout_for_current(&mut self) -> Option<&mut WorktreeLayout> {
+        let slug = self.current_slug()?;
+        Some(
+            self.layouts
+                .entry(slug.clone())
+                .or_insert_with(|| WorktreeLayout::new(&slug)),
+        )
+    }
+
+    /// Adds a focused shell tab to the current worktree's layout (in-memory only;
+    /// the real PTY spawns next frame in `ensure_active_session`).
+    pub fn new_shell_tab(&mut self) {
+        let Some(slug) = self.current_slug() else {
+            return;
+        };
+        self.layouts
+            .entry(slug.clone())
+            .or_insert_with(|| WorktreeLayout::new(&slug))
+            .add_shell_tab(&slug);
+    }
+
+    /// Focuses the next tab of the current worktree (wrapping). No-op if no layout.
+    pub fn next_tab(&mut self) {
+        if let Some(layout) = self.layout_for_current() {
+            layout.next_tab();
+        }
+    }
+
+    /// Focuses the previous tab of the current worktree (wrapping). No-op if no
+    /// layout.
+    pub fn prev_tab(&mut self) {
+        if let Some(layout) = self.layout_for_current() {
+            layout.prev_tab();
+        }
+    }
+
+    /// Closes the active tab. A shell tab's named session is killed and
+    /// `active_session` is cleared if it pointed there (so it respawns next
+    /// frame). The agent tab (0) and the last remaining tab are guarded with a
+    /// status message.
+    pub fn close_tab(&mut self) {
+        let Some(slug) = self.current_slug() else {
+            return;
+        };
+        let closed = match self.layouts.get_mut(&slug) {
+            Some(layout) => layout.close_active(),
+            None => return,
+        };
+        match closed {
+            Some(session) => {
+                self.session_manager.kill(&session);
+                if self.active_session.as_deref() == Some(session.as_str()) {
+                    self.active_session = None;
+                }
+            }
+            None => self.status = Some("cannot close the agent tab".to_string()),
+        }
+    }
+
+    /// Lazily spawns (or reuses) the ACTIVE tab's session for the current worktree
+    /// and records its name in `active_session`. Seeds the worktree's tab layout
+    /// (agent-only) on first use. The agent tab runs the worktree's agent command;
+    /// a shell tab runs the default shell (`None`). Spawn errors land in `status`.
     pub fn ensure_active_session(&mut self, rows: u16, cols: u16) {
         let Some(wt) = self.current_worktree() else {
             self.active_session = None;
@@ -404,13 +480,23 @@ impl App {
         };
         let branch = wt.branch.clone();
         let path = wt.path.clone();
-        let name = SessionManager::session_name(&branch);
-        let cmd = self.config.agent_cmd_for(&branch);
+        let slug = crate::worktree::slugify(&branch);
+        let tab = self
+            .layouts
+            .entry(slug.clone())
+            .or_insert_with(|| WorktreeLayout::new(&slug))
+            .active_tab()
+            .clone();
+        let agent_cmd = self.config.agent_cmd_for(&branch);
+        let command = match tab.kind {
+            TabKind::Agent => Some(agent_cmd),
+            TabKind::Shell => None,
+        };
         match self
             .session_manager
-            .ensure(&branch, &path, &cmd, rows, cols)
+            .ensure_named(&tab.session, &path, command.as_deref(), rows, cols)
         {
-            Ok(_) => self.active_session = Some(name),
+            Ok(_) => self.active_session = Some(tab.session),
             Err(e) => self.status = Some(format!("agent spawn failed: {e}")),
         }
     }
@@ -665,9 +751,20 @@ impl App {
             .find(|w| w.path == path)
             .map(|w| w.branch.clone());
         // `Session::Drop` detaches without killing tmux (for reattach), so the
-        // explicit remove path is the only place that reaps the agent's
-        // `wtcc-<slug>` session. Best-effort kill keyed off the worktree's branch.
+        // explicit remove path is the only place that reaps the worktree's
+        // sessions. Kill EVERY tab surface (`wtcc-<slug>` agent + `wtcc-<slug>-t*`
+        // shells) and drop the layout so no shell session is orphaned (#48), then
+        // the branch-keyed agent kill covers the no-layout case. Best-effort.
         if let Some(branch) = branch.as_deref() {
+            let slug = crate::worktree::slugify(branch);
+            if let Some(layout) = self.layouts.remove(&slug) {
+                for tab in &layout.tabs {
+                    self.session_manager.kill(&tab.session);
+                    if self.active_session.as_deref() == Some(tab.session.as_str()) {
+                        self.active_session = None;
+                    }
+                }
+            }
             let name = SessionManager::session_name(branch);
             self.session_manager.kill(&name);
             if self.active_session.as_deref() == Some(name.as_str()) {
@@ -1005,6 +1102,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
             vcs_status: HashMap::new(),
@@ -1248,6 +1346,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: Some(config_path),
             vcs_status: HashMap::new(),
@@ -1548,6 +1647,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
             vcs_status: HashMap::new(),
@@ -1908,6 +2008,179 @@ mod tests {
         assert_eq!(
             wt_head, head_commit,
             "with base_ref unset, a new branch forks from HEAD (unchanged)"
+        );
+    }
+
+    // --- issue #48: per-worktree TABS (multiple surfaces, no split panes) ----
+    //
+    // TDD RED: each worktree owns a `WorktreeLayout` (keyed by slug in
+    // `app.layouts`). Tab 0 is the AGENT (`wtcc-<slug>`); `new_shell_tab` appends
+    // a SHELL surface (`wtcc-<slug>-t<n>`), focuses it, and only mutates the
+    // in-memory model — the real spawn happens next frame in
+    // `ensure_active_session` (which drives the active tab and sets
+    // `active_session`). `close_tab` kills the removed shell's session (and only
+    // that one), refusing on the agent/last tab with a status. `next_tab`/
+    // `prev_tab` cycle with wrap. Switching worktrees restores each layout.
+    // `insert_spawned` seeds live sessions so the kill side-effect is observable
+    // without tmux.
+
+    #[test]
+    fn new_shell_tab_creates_the_layout_and_appends_a_focused_shell() {
+        let mut app = app_with_fake_worktrees(); // main selected
+        assert!(!app.layouts.contains_key("main"));
+
+        app.new_shell_tab();
+
+        let layout = app
+            .layouts
+            .get("main")
+            .expect("new_shell_tab must create the worktree's layout");
+        assert_eq!(layout.tabs.len(), 2, "agent tab + one shell tab");
+        assert_eq!(layout.active, 1, "the new shell tab is focused");
+        assert_eq!(layout.tabs[0].session, SessionManager::session_name("main"));
+        assert_eq!(layout.tabs[0].kind, crate::layout::TabKind::Agent);
+        assert_eq!(layout.tabs[1].session, "wtcc-main-t1");
+        assert_eq!(layout.tabs[1].kind, crate::layout::TabKind::Shell);
+    }
+
+    #[test]
+    fn next_tab_and_prev_tab_cycle_the_current_layout() {
+        let mut app = app_with_fake_worktrees();
+        app.new_shell_tab(); // [agent, shell] active 1
+
+        app.next_tab(); // wrap to 0
+        assert_eq!(app.layouts.get("main").unwrap().active, 0);
+        app.prev_tab(); // wrap to 1
+        assert_eq!(app.layouts.get("main").unwrap().active, 1);
+    }
+
+    #[test]
+    fn close_tab_kills_only_the_removed_shell_session_and_keeps_the_agent() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees();
+        app.new_shell_tab(); // active shell, session wtcc-main-t1
+        let agent = SessionManager::session_name("main"); // wtcc-main
+        let shell = "wtcc-main-t1".to_string();
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        app.session_manager
+            .insert_spawned(&agent, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&shell, b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(shell.clone());
+
+        app.close_tab();
+
+        assert!(
+            app.session_manager.get(&shell).is_none(),
+            "closing a shell tab kills its named session"
+        );
+        assert!(
+            app.session_manager.get(&agent).is_some(),
+            "the agent (tab 0) session must survive a shell-tab close"
+        );
+        let layout = app.layouts.get("main").unwrap();
+        assert_eq!(layout.tabs.len(), 1);
+        assert_eq!(layout.active, 0, "focus falls back to the agent tab");
+        assert_eq!(
+            app.active_session, None,
+            "active_session clears when the closed tab was active (respawns next frame)"
+        );
+    }
+
+    #[test]
+    fn close_tab_refuses_the_agent_tab_with_a_status() {
+        let mut app = app_with_fake_worktrees();
+        app.new_shell_tab();
+        app.close_tab(); // remove the shell -> agent-only
+        app.status = None;
+
+        app.close_tab(); // only the agent tab remains: guarded no-op
+
+        let layout = app.layouts.get("main").unwrap();
+        assert_eq!(layout.tabs.len(), 1, "the agent tab is not closable");
+        assert_eq!(layout.active, 0);
+        assert!(
+            app.status.is_some(),
+            "a refused close reports a status message"
+        );
+    }
+
+    #[test]
+    fn ensure_active_session_creates_the_layout_and_activates_the_agent_tab() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees(); // main selected
+        let agent = SessionManager::session_name("main");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["x"]);
+        // Pre-seed the agent session so the active tab's ensure reuses it
+        // (idempotent) — no tmux needed in the unit test.
+        app.session_manager
+            .insert_spawned(&agent, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+
+        app.ensure_active_session(24, 80);
+
+        let layout = app
+            .layouts
+            .get("main")
+            .expect("ensure_active_session must seed the worktree layout");
+        assert_eq!(
+            layout.tabs.len(),
+            1,
+            "a fresh worktree has only the agent tab"
+        );
+        assert_eq!(layout.tabs[0].kind, crate::layout::TabKind::Agent);
+        assert_eq!(
+            app.active_session.as_deref(),
+            Some(agent.as_str()),
+            "the active tab's session becomes active_session"
+        );
+    }
+
+    #[test]
+    fn each_worktree_keeps_its_own_tab_layout_across_switches() {
+        let mut app = app_with_fake_worktrees(); // main(0), feat(1), selected 0
+        app.new_shell_tab(); // main: [agent, t1] active 1
+
+        app.selected_worktree = Some(1); // switch to feat
+        app.new_shell_tab();
+        app.new_shell_tab(); // feat: [agent, t1, t2] active 2
+
+        app.selected_worktree = Some(0); // back to main
+
+        let main = app.layouts.get("main").unwrap();
+        assert_eq!(main.tabs.len(), 2);
+        assert_eq!(main.active, 1);
+        assert_eq!(main.tabs[1].session, "wtcc-main-t1");
+
+        let feat = app.layouts.get("feat").unwrap();
+        assert_eq!(feat.tabs.len(), 3);
+        assert_eq!(feat.active, 2);
+        assert_eq!(feat.tabs[2].session, "wtcc-feat-t2");
+    }
+
+    #[test]
+    fn current_slug_slugifies_the_selected_branch() {
+        let mut app = app_with_fake_worktrees();
+        app.worktrees.push(Worktree {
+            path: PathBuf::from("/repo/feature"),
+            branch: "Feature/Big Thing".to_string(),
+            head: "z".to_string(),
+            is_bare: false,
+            is_detached: false,
+        });
+        app.selected_worktree = Some(app.worktrees.len() - 1);
+        assert_eq!(
+            app.current_slug().as_deref(),
+            Some("feature-big-thing"),
+            "current_slug must slugify untrusted branch names before they key state"
         );
     }
 }
