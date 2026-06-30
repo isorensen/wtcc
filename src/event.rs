@@ -238,6 +238,7 @@ fn handle_input(app: &mut App, key: KeyEvent) {
             match prompt {
                 Prompt::AddWorktree => app.add_worktree(&value),
                 Prompt::AddRepo => app.register_repository(&value),
+                Prompt::RenameBranch => app.rename_branch(&value),
             }
         }
         _ => {}
@@ -288,6 +289,18 @@ fn open_register_prompt(app: &mut App) {
         prompt: Prompt::AddRepo,
         buffer: String::new(),
     };
+}
+
+fn open_rename_prompt(app: &mut App) {
+    match app.current_worktree() {
+        Some(_) => {
+            app.overlay = Overlay::Input {
+                prompt: Prompt::RenameBranch,
+                buffer: String::new(),
+            }
+        }
+        None => app.status = Some("no worktree selected".to_string()),
+    }
 }
 
 fn request_remove(app: &mut App) {
@@ -342,6 +355,7 @@ fn run_action(app: &mut App, action: Action) {
         Action::RemoveRepo => request_remove_repo(app),
         Action::AddWorktree => open_add_prompt(app),
         Action::RemoveWorktree => request_remove(app),
+        Action::RenameBranch => open_rename_prompt(app),
         Action::RestartAgent => request_restart_agent(app),
         Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),

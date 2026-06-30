@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Rename a worktree's branch** (`b`): renames the branch via `git branch -m` and
+  re-keys the agent's `tmux` session in place (`tmux rename-session`) so the running
+  agent stays attached. The worktree directory does not move, so PR/CI and attention
+  state are preserved. Rejects empty names, collisions, and detached/bare worktrees (#51).
 - **GitHub PR write actions** via `gh`: open the PR in the browser (`o`), mark a
   draft ready, merge (`m`), and close — all from the palette, with merge/close
   behind a confirm overlay. Merge strategy is per-repo (`merge_strategy`, default
