@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-30
+
 ### Added
 - **Copy-on-create files**: set `copy_on_create` (relative paths like `.env`) on a
   repo and those files are copied from the repo root into each new worktree on
@@ -148,7 +150,8 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/isorensen/wtcc/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/isorensen/wtcc/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/isorensen/wtcc/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/isorensen/wtcc/compare/v0.3.0...v0.4.0
