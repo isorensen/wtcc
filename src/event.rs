@@ -239,6 +239,10 @@ fn handle_input(app: &mut App, key: KeyEvent) {
                 Prompt::AddWorktree => app.add_worktree(&value),
                 Prompt::AddRepo => app.register_repository(&value),
                 Prompt::RenameBranch => app.rename_branch(&value),
+                Prompt::SwitchAgent => match app.current_worktree().map(|w| w.branch.clone()) {
+                    Some(branch) => app.set_worktree_agent(&branch, value.trim()),
+                    None => app.status = Some("no worktree selected".to_string()),
+                },
             }
         }
         _ => {}
@@ -303,6 +307,18 @@ fn open_rename_prompt(app: &mut App) {
     }
 }
 
+fn open_switch_agent_prompt(app: &mut App) {
+    match app.current_worktree() {
+        Some(_) => {
+            app.overlay = Overlay::Input {
+                prompt: Prompt::SwitchAgent,
+                buffer: String::new(),
+            }
+        }
+        None => app.status = Some("no worktree selected".to_string()),
+    }
+}
+
 fn request_remove(app: &mut App) {
     match app.current_worktree() {
         Some(wt) => app.overlay = Overlay::Confirm(Confirm::RemoveWorktree(wt.path.clone())),
@@ -359,6 +375,7 @@ fn run_action(app: &mut App, action: Action) {
         Action::RestartAgent => request_restart_agent(app),
         Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),
+        Action::SwitchAgent => open_switch_agent_prompt(app),
         Action::Refresh => app.refresh_worktrees(),
         Action::OpenPrWeb => app.pr_open_in_browser(),
         Action::MarkReady => app.pr_mark_ready(),
@@ -392,6 +409,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
         });
         app.status = None;
         app.worktrees = vec![Worktree {

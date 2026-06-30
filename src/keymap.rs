@@ -27,6 +27,7 @@ pub enum Action {
     RestartAgent,
     JumpAttention,
     SwitchRepo,
+    SwitchAgent,
     Refresh,
     OpenPrWeb,
     MarkReady,
@@ -38,7 +39,7 @@ pub enum Action {
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 20] = [
+    pub const ALL: [Action; 21] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -53,6 +54,7 @@ impl Action {
         Action::RestartAgent,
         Action::JumpAttention,
         Action::SwitchRepo,
+        Action::SwitchAgent,
         Action::Refresh,
         Action::OpenPrWeb,
         Action::MarkReady,
@@ -80,6 +82,7 @@ impl Action {
             Action::RestartAgent => "Restart agent",
             Action::JumpAttention => "Jump to attention",
             Action::SwitchRepo => "Switch repo",
+            Action::SwitchAgent => "Switch agent",
             Action::Refresh => "Refresh",
             Action::OpenPrWeb => "Open PR in browser",
             Action::MarkReady => "Mark PR ready",
@@ -102,6 +105,7 @@ impl Action {
                 | Action::RestartAgent
                 | Action::JumpAttention
                 | Action::SwitchRepo
+                | Action::SwitchAgent
                 | Action::Refresh
                 | Action::OpenPrWeb
                 | Action::MarkReady
@@ -202,6 +206,10 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('R'))],
         action: Action::RestartAgent,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('A'))],
+        action: Action::SwitchAgent,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char('g'))],

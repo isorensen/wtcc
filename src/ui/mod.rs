@@ -54,7 +54,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     match &app.overlay {
         Overlay::None => {}
         Overlay::Palette { query, selected } => render_palette(query, *selected, area, buf),
-        Overlay::Input { prompt, buffer } => render_input(prompt, buffer, area, buf),
+        Overlay::Input { prompt, buffer } => render_input(app, prompt, buffer, area, buf),
         Overlay::Confirm(confirm) => render_confirm(app, confirm, area, buf),
         Overlay::Help => render_help(app, area, buf),
     }
@@ -150,14 +150,24 @@ fn render_palette(query: &str, selected: usize, area: Rect, buf: &mut Buffer) {
     List::new(items).render(rows[1], buf);
 }
 
-fn render_input(prompt: &Prompt, buffer: &str, area: Rect, buf: &mut Buffer) {
+fn render_input(app: &App, prompt: &Prompt, buffer: &str, area: Rect, buf: &mut Buffer) {
     let rect = centered(60, 20, area);
     Clear.render(rect, buf);
 
     let (title, label) = match prompt {
-        Prompt::AddWorktree => (" add worktree ", "branch (new or existing): "),
-        Prompt::AddRepo => (" register repository ", "path: "),
-        Prompt::RenameBranch => (" rename branch ", "new branch name: "),
+        Prompt::AddWorktree => (" add worktree ", "branch (new or existing): ".to_string()),
+        Prompt::AddRepo => (" register repository ", "path: ".to_string()),
+        Prompt::RenameBranch => (" rename branch ", "new branch name: ".to_string()),
+        Prompt::SwitchAgent => {
+            let names = app
+                .config
+                .presets()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            (" switch agent ", format!("switch agent ({names}): "))
+        }
     };
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(rect);
@@ -301,6 +311,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
         });
         app.worktrees = vec![Worktree {
             path: PathBuf::from("/tmp/demo-repo/main"),

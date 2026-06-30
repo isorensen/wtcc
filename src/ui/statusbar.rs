@@ -93,6 +93,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
         });
         app.status = None;
         app.selected_repo = Some(0);

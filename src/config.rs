@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -6,12 +7,28 @@ use serde::{Deserialize, Serialize};
 use crate::pr::MergeStrategy;
 use crate::repository::Repository;
 
+/// A named agent command, e.g. `{name = "codex", cmd = "codex --model x"}`. The
+/// `cmd` is whitespace-split into an argv at spawn time (no shell).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentPreset {
+    pub name: String,
+    pub cmd: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub repos: Vec<Repository>,
     #[serde(default = "default_agent_cmd")]
     pub agent_cmd: String,
+    /// Named agent presets. Empty in legacy configs; a single `default` preset is
+    /// then synthesized from `agent_cmd` (see [`Config::presets`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentPreset>,
+    /// Per-worktree agent choice, keyed by branch -> preset name. Empty in legacy
+    /// configs; an unmapped branch uses the first preset.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub worktree_agents: HashMap<String, String>,
     /// Whether to fire a desktop notification (via `notify-send`) when an agent
     /// goes quiet and needs input. Defaults to `true`; absent in legacy configs.
     #[serde(default = "default_notify")]
@@ -35,6 +52,8 @@ impl Default for Config {
         Config {
             repos: Vec::new(),
             agent_cmd: default_agent_cmd(),
+            agents: Vec::new(),
+            worktree_agents: HashMap::new(),
             notify: default_notify(),
             merge_strategy: MergeStrategy::default(),
         }
@@ -56,6 +75,40 @@ impl Config {
 
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&config_path()?)
+    }
+
+    /// The agent presets, with a single `default` synthesized from the scalar
+    /// `agent_cmd` when no `agents` are defined (back-compat for legacy configs).
+    pub fn presets(&self) -> Vec<AgentPreset> {
+        if self.agents.is_empty() {
+            vec![AgentPreset {
+                name: "default".to_string(),
+                cmd: self.agent_cmd.clone(),
+            }]
+        } else {
+            self.agents.clone()
+        }
+    }
+
+    /// Resolves the agent command for `branch`: its chosen preset's `cmd`, with a
+    /// total fallback to the first preset when the branch is unmapped or its
+    /// mapping names a preset that no longer exists. `presets()` is never empty,
+    /// so this always returns a command.
+    pub fn agent_cmd_for(&self, branch: &str) -> String {
+        let presets = self.presets();
+        self.worktree_agents
+            .get(branch)
+            .and_then(|name| presets.iter().find(|p| &p.name == name))
+            .or_else(|| presets.first())
+            .map(|p| p.cmd.clone())
+            .unwrap_or_default()
+    }
+
+    /// Records `branch`'s agent choice by preset `name`. Persistence is the
+    /// caller's responsibility.
+    pub fn set_worktree_agent(&mut self, branch: &str, name: &str) {
+        self.worktree_agents
+            .insert(branch.to_string(), name.to_string());
     }
 
     pub fn load_from(path: &Path) -> anyhow::Result<Config> {
@@ -104,6 +157,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: MergeStrategy::default(),
+            ..Default::default()
         };
 
         original.save_to(&path).unwrap();
@@ -167,6 +221,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: MergeStrategy::default(),
+            ..Default::default()
         };
 
         original.save_to(&path).unwrap();
@@ -184,5 +239,179 @@ mod tests {
         assert_eq!(loaded, original);
         assert_eq!(loaded.repos[0].setup.as_deref(), Some("npm install"));
         assert_eq!(loaded.repos[0].archive, None);
+    }
+
+    // --- issue #52: per-worktree agent presets ------------------------------
+    //
+    // TDD RED: presets are additive and back-compatible. `agents` (named presets)
+    // and `worktree_agents` (branch -> preset name) both default to empty and are
+    // omitted from the serialized output when empty. `presets()` derives a single
+    // `default` preset from the scalar `agent_cmd` when none are defined, else
+    // returns the defined list verbatim. `agent_cmd_for(branch)` resolves the
+    // branch's chosen preset cmd, with a TOTAL fallback to the first preset's cmd
+    // (unmapped branch, or a mapping naming a preset that no longer exists).
+    // `Config::set_worktree_agent` records a branch -> preset-name choice.
+
+    use std::collections::HashMap;
+
+    fn preset(name: &str, cmd: &str) -> AgentPreset {
+        AgentPreset {
+            name: name.to_string(),
+            cmd: cmd.to_string(),
+        }
+    }
+
+    #[test]
+    fn presets_derives_single_default_from_scalar_when_agents_empty() {
+        let cfg = Config {
+            agent_cmd: "claude".to_string(),
+            ..Default::default()
+        };
+        let presets = cfg.presets();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].name, "default");
+        assert_eq!(presets[0].cmd, "claude");
+    }
+
+    #[test]
+    fn presets_returns_defined_agents_verbatim() {
+        let agents = vec![
+            preset("claude", "claude"),
+            preset("codex", "codex --model x"),
+        ];
+        let cfg = Config {
+            agents: agents.clone(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.presets(), agents);
+    }
+
+    #[test]
+    fn agent_cmd_for_returns_the_mapped_presets_cmd() {
+        let mut worktree_agents = HashMap::new();
+        worktree_agents.insert("main".to_string(), "codex".to_string());
+        let cfg = Config {
+            agents: vec![
+                preset("claude", "claude"),
+                preset("codex", "codex --model x"),
+            ],
+            worktree_agents,
+            ..Default::default()
+        };
+        assert_eq!(cfg.agent_cmd_for("main"), "codex --model x");
+    }
+
+    #[test]
+    fn agent_cmd_for_preserves_a_multi_token_cmd_for_whitespace_argv_split() {
+        // argv-split happens at spawn time (whitespace); the resolved cmd must be
+        // returned intact so `codex --model x` becomes 3 argv elements downstream.
+        let mut worktree_agents = HashMap::new();
+        worktree_agents.insert("main".to_string(), "codex".to_string());
+        let cfg = Config {
+            agents: vec![preset("codex", "codex --model x")],
+            worktree_agents,
+            ..Default::default()
+        };
+        assert_eq!(cfg.agent_cmd_for("main"), "codex --model x");
+        assert_eq!(cfg.agent_cmd_for("main").split_whitespace().count(), 3);
+    }
+
+    #[test]
+    fn agent_cmd_for_falls_back_to_the_first_preset_when_branch_unmapped() {
+        let cfg = Config {
+            agents: vec![preset("claude", "claude"), preset("codex", "codex")],
+            ..Default::default()
+        };
+        assert_eq!(cfg.agent_cmd_for("unmapped-branch"), "claude");
+    }
+
+    #[test]
+    fn agent_cmd_for_falls_back_when_the_mapped_preset_name_is_missing() {
+        let mut worktree_agents = HashMap::new();
+        worktree_agents.insert("main".to_string(), "deleted-preset".to_string());
+        let cfg = Config {
+            agents: vec![preset("claude", "claude"), preset("codex", "codex")],
+            worktree_agents,
+            ..Default::default()
+        };
+        // The mapping names a preset that no longer exists -> total fallback.
+        assert_eq!(cfg.agent_cmd_for("main"), "claude");
+    }
+
+    #[test]
+    fn agent_cmd_for_uses_the_scalar_default_when_no_presets_defined() {
+        let cfg = Config {
+            agent_cmd: "claude".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.agent_cmd_for("anything"), "claude");
+    }
+
+    #[test]
+    fn set_worktree_agent_records_the_branch_to_preset_choice() {
+        let mut cfg = Config {
+            agents: vec![preset("codex", "codex")],
+            ..Default::default()
+        };
+        cfg.set_worktree_agent("main", "codex");
+        assert_eq!(cfg.worktree_agents.get("main"), Some(&"codex".to_string()));
+    }
+
+    #[test]
+    fn legacy_scalar_only_config_loads_with_empty_presets_and_a_working_default() {
+        // A config.toml written before #52 has only repos + agent_cmd.
+        let cfg: Config = toml::from_str("agent_cmd = \"claude\"\n").unwrap();
+        assert!(cfg.agents.is_empty(), "no [[agents]] -> empty list");
+        assert!(
+            cfg.worktree_agents.is_empty(),
+            "no worktree_agents -> empty map"
+        );
+        let presets = cfg.presets();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].name, "default");
+        assert_eq!(presets[0].cmd, "claude");
+        assert_eq!(cfg.agent_cmd_for("any-branch"), "claude");
+    }
+
+    #[test]
+    fn agents_and_worktree_agents_round_trip_and_empty_maps_are_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Empty maps must be omitted from the serialized output.
+        let empty_path = dir.path().join("empty.toml");
+        Config {
+            agent_cmd: "claude".to_string(),
+            ..Default::default()
+        }
+        .save_to(&empty_path)
+        .unwrap();
+        let empty_serialized = std::fs::read_to_string(&empty_path).unwrap();
+        assert!(
+            !empty_serialized.contains("agents"),
+            "empty agents/worktree_agents must be omitted, got:\n{empty_serialized}"
+        );
+
+        // Populated maps must serialize and round-trip exactly.
+        let mut worktree_agents = HashMap::new();
+        worktree_agents.insert("main".to_string(), "codex".to_string());
+        let original = Config {
+            agent_cmd: "claude".to_string(),
+            agents: vec![
+                preset("claude", "claude"),
+                preset("codex", "codex --model x"),
+            ],
+            worktree_agents,
+            ..Default::default()
+        };
+        let path = dir.path().join("populated.toml");
+        original.save_to(&path).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serialized.contains("codex"),
+            "populated agents must serialize, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, original);
     }
 }
