@@ -504,17 +504,26 @@ impl App {
         match result {
             Ok(()) => {
                 self.refresh_worktrees();
-                // SETUP runs once in the new worktree, best-effort and detached.
-                if let Some(setup) = self
-                    .selected_repo
-                    .and_then(|i| self.config.repos.get(i))
-                    .and_then(|r| r.setup.clone())
-                {
-                    self.status = Some(format!("added worktree {branch}; running setup…"));
-                    spawn_setup(&setup, &new_path);
-                } else {
-                    self.status = Some(format!("added worktree {branch}"));
+                let repo_entry = self.selected_repo.and_then(|i| self.config.repos.get(i));
+                let copy_on_create = repo_entry
+                    .map(|r| r.copy_on_create.clone())
+                    .unwrap_or_default();
+                let setup = repo_entry.and_then(|r| r.setup.clone());
+
+                let mut msg = format!("added worktree {branch}");
+                if !copy_on_create.is_empty() {
+                    let report = worktree::copy_into_worktree(&repo, &new_path, &copy_on_create);
+                    msg.push_str(&format!(
+                        "; copied {} skipped {}",
+                        report.copied, report.skipped
+                    ));
                 }
+                // SETUP runs once in the new worktree, best-effort and detached.
+                if let Some(setup) = setup {
+                    msg.push_str("; running setup…");
+                    spawn_setup(&setup, &new_path);
+                }
+                self.status = Some(msg);
             }
             Err(e) => self.status = Some(format!("add failed: {e}")),
         }
@@ -957,6 +966,7 @@ mod tests {
                 archive: None,
                 archived: Vec::new(),
                 base_ref: None,
+                copy_on_create: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -1210,6 +1220,7 @@ mod tests {
                         archive: None,
                         archived: Vec::new(),
                         base_ref: None,
+                        copy_on_create: Vec::new(),
                     },
                     Repository {
                         name: "repo-b".to_string(),
@@ -1218,6 +1229,7 @@ mod tests {
                         archive: None,
                         archived: Vec::new(),
                         base_ref: None,
+                        copy_on_create: Vec::new(),
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -1518,6 +1530,7 @@ mod tests {
                     archive: None,
                     archived: Vec::new(),
                     base_ref: None,
+                    copy_on_create: Vec::new(),
                 }],
                 agent_cmd: "claude".to_string(),
                 notify: true,

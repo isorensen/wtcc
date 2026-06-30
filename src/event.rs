@@ -434,6 +434,7 @@ mod tests {
                 archive: None,
                 archived: Vec::new(),
                 base_ref: None,
+                copy_on_create: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -691,6 +692,7 @@ mod tests {
                 archive: None,
                 archived: Vec::new(),
                 base_ref: None,
+                copy_on_create: Vec::new(),
             })
             .collect()
     }

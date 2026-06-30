@@ -24,6 +24,11 @@ pub struct Repository {
     /// omitted from output when unset; edited by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Relative paths (from the repo root) copied into a new worktree on creation,
+    /// e.g. `.env` or `config/local.toml` — git-ignored files that do not carry
+    /// over. Absent in legacy configs and omitted from output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy_on_create: Vec<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -57,6 +62,7 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         archive: None,
         archived: Vec::new(),
         base_ref: None,
+        copy_on_create: Vec::new(),
     })
 }
 

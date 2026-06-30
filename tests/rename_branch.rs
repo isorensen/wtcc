@@ -77,6 +77,7 @@ fn base_app() -> App {
             archive: None,
             archived: Vec::new(),
             base_ref: None,
+            copy_on_create: Vec::new(),
         }],
         ..Default::default()
     };

@@ -155,6 +155,7 @@ mod tests {
                 archive: None,
                 archived: Vec::new(),
                 base_ref: None,
+                copy_on_create: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -221,6 +222,7 @@ mod tests {
                 archive: None,
                 archived: Vec::new(),
                 base_ref: None,
+                copy_on_create: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -479,5 +481,71 @@ mod tests {
         let loaded = Config::load_from(&populated_path).unwrap();
         assert_eq!(loaded, original);
         assert_eq!(loaded.repos[0].base_ref.as_deref(), Some("origin/main"));
+    }
+
+    // --- issue #55: per-repo copy_on_create allowlist -----------------------
+    //
+    // TDD RED: `Repository.copy_on_create: Vec<String>` is its OWN additive,
+    // back-compatible field (no shared bump). A repos entry written before #55
+    // has no `copy_on_create` key and must load as an empty Vec (serde default);
+    // an empty list is omitted on save (skip_serializing_if), and a populated one
+    // round-trips exactly. The list holds relative paths from the repo root.
+
+    #[test]
+    fn legacy_repo_entry_without_copy_on_create_loads_as_empty() {
+        let cfg: Config = toml::from_str(
+            "agent_cmd = \"claude\"\n[[repos]]\nname = \"demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .unwrap();
+        assert!(cfg.repos[0].copy_on_create.is_empty());
+    }
+
+    #[test]
+    fn copy_on_create_round_trips_and_empty_is_omitted_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // An empty copy_on_create must be omitted from the serialized output.
+        let empty_path = dir.path().join("empty.toml");
+        Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                copy_on_create: Vec::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_to(&empty_path)
+        .unwrap();
+        let empty_serialized = std::fs::read_to_string(&empty_path).unwrap();
+        assert!(
+            !empty_serialized.contains("copy_on_create"),
+            "an empty copy_on_create must be omitted via skip_serializing_if, got:\n{empty_serialized}"
+        );
+
+        // A populated copy_on_create must serialize and round-trip exactly.
+        let populated_path = dir.path().join("populated.toml");
+        let original = Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                copy_on_create: vec![".env".to_string(), "config/local.toml".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        original.save_to(&populated_path).unwrap();
+        let serialized = std::fs::read_to_string(&populated_path).unwrap();
+        assert!(
+            serialized.contains("copy_on_create") && serialized.contains(".env"),
+            "a populated copy_on_create must be serialized, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&populated_path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(
+            loaded.repos[0].copy_on_create,
+            vec![".env".to_string(), "config/local.toml".to_string()]
+        );
     }
 }
