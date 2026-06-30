@@ -97,6 +97,7 @@ pub enum Prompt {
     AddWorktree,
     AddRepo,
     RenameBranch,
+    SwitchAgent,
 }
 
 /// What the user is being asked to confirm while a confirm overlay is open.
@@ -365,9 +366,10 @@ impl App {
         let branch = wt.branch.clone();
         let path = wt.path.clone();
         let name = SessionManager::session_name(&branch);
+        let cmd = self.config.agent_cmd_for(&branch);
         match self
             .session_manager
-            .ensure(&branch, &path, &self.config.agent_cmd, rows, cols)
+            .ensure(&branch, &path, &cmd, rows, cols)
         {
             Ok(_) => self.active_session = Some(name),
             Err(e) => self.status = Some(format!("agent spawn failed: {e}")),
@@ -661,6 +663,37 @@ impl App {
         self.status = Some(format!("restarting agent for {branch}"));
     }
 
+    /// Records `branch`'s agent choice (preset `name`), persists the config, then
+    /// restarts that worktree's agent so the new cmd takes effect (reuses
+    /// `restart_agent`: kills only that `wtcc-<slug>` session). A persist failure
+    /// rolls the in-memory choice back and reports it — never panics, never
+    /// touches another worktree's session. An unknown preset name is rejected
+    /// (status reports the valid names) and nothing is persisted or restarted.
+    pub fn set_worktree_agent(&mut self, branch: &str, name: &str) {
+        let presets = self.config.presets();
+        if !presets.iter().any(|p| p.name == name) {
+            let available = presets
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.status = Some(format!("unknown agent '{name}'; available: {available}"));
+            return;
+        }
+        self.config.set_worktree_agent(branch, name);
+        let save = match &self.config_path {
+            Some(path) => self.config.save_to(path),
+            None => self.config.save(),
+        };
+        if let Err(e) = save {
+            self.config.worktree_agents.remove(branch);
+            self.status = Some(format!("save failed: {e}"));
+            return;
+        }
+        self.restart_agent(branch);
+        self.status = Some(format!("switched agent for {branch} to {name}"));
+    }
+
     /// Resolves the `(branch, path)` of the selected worktree's PR, or an error
     /// message describing why no PR action can run: no worktree selected, or the
     /// selected worktree has no cached PR. The branch is the discrete argument
@@ -822,6 +855,7 @@ mod tests {
             agent_cmd: "claude".to_string(),
             notify: true,
             merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
         }
     }
 
@@ -1014,6 +1048,7 @@ mod tests {
                 agent_cmd: "claude".to_string(),
                 notify: true,
                 merge_strategy: crate::pr::MergeStrategy::default(),
+                ..Default::default()
             },
             selected_repo: Some(1),
             worktrees: Vec::new(),
@@ -1309,6 +1344,7 @@ mod tests {
                 agent_cmd: "claude".to_string(),
                 notify: true,
                 merge_strategy: crate::pr::MergeStrategy::default(),
+                ..Default::default()
             },
             selected_repo: Some(0),
             worktrees: Vec::new(),
@@ -1483,6 +1519,120 @@ mod tests {
         assert_eq!(
             recorded.trim(),
             cwd.path().canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    // --- issue #52: per-worktree agent presets (session isolation) ----------
+    //
+    // TDD RED: `App::set_worktree_agent(branch, name)` records the choice in
+    // `config.worktree_agents`, persists it to the redirected `config_path`, then
+    // RESTARTS that worktree's agent (kills its `wtcc-<slug>` tmux session + drops
+    // the local `Session` so a fresh agent respawns with the new cmd) and sets
+    // status. It must touch ONLY the chosen worktree's session, never another's.
+    // `insert_spawned` is the test-only seam to seed live sessions without tmux,
+    // so this isolation check lives in-module rather than in the integration file.
+
+    #[test]
+    fn set_worktree_agent_persists_restarts_that_session_and_leaves_others() {
+        use portable_pty::CommandBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        let mut app = app_with_fake_worktrees(); // main(/repo/main), feat(/repo/feat)
+        app.config.agents = vec![crate::config::AgentPreset {
+            name: "codex".to_string(),
+            cmd: "codex --model x".to_string(),
+        }];
+        app.config_path = Some(cfg_path.clone());
+
+        let main = SessionManager::session_name("main");
+        let feat = SessionManager::session_name("feat");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        app.session_manager
+            .insert_spawned(&main, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&feat, b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(main.clone());
+
+        app.set_worktree_agent("main", "codex");
+
+        assert_eq!(
+            app.config.worktree_agents.get("main"),
+            Some(&"codex".to_string()),
+            "the choice must be recorded in config"
+        );
+        assert!(
+            app.session_manager.get(&main).is_none(),
+            "switching agents must restart (kill) the chosen worktree's session"
+        );
+        assert!(
+            app.session_manager.get(&feat).is_some(),
+            "switching one worktree's agent must leave every other session intact"
+        );
+        assert_eq!(
+            app.active_session, None,
+            "active_session must clear so the new cmd respawns next frame"
+        );
+        assert!(app.status.is_some(), "the switch must report status");
+
+        let persisted = Config::load_from(&cfg_path).unwrap();
+        assert_eq!(
+            persisted.worktree_agents.get("main"),
+            Some(&"codex".to_string()),
+            "the choice must survive a restart (persisted to config_path)"
+        );
+    }
+
+    #[test]
+    fn set_worktree_agent_rejects_unknown_preset_without_restart_or_persist() {
+        use portable_pty::CommandBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        let mut app = app_with_fake_worktrees();
+        app.config.agents = vec![crate::config::AgentPreset {
+            name: "codex".to_string(),
+            cmd: "codex --model x".to_string(),
+        }];
+        app.config_path = Some(cfg_path.clone());
+
+        let main = SessionManager::session_name("main");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        app.session_manager
+            .insert_spawned(&main, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(main.clone());
+
+        app.set_worktree_agent("main", "bogus");
+
+        assert_eq!(
+            app.config.worktree_agents.get("main"),
+            None,
+            "an unknown preset name must not be recorded"
+        );
+        assert!(
+            app.session_manager.get(&main).is_some(),
+            "rejecting an unknown preset must not restart the session"
+        );
+        assert_eq!(
+            app.active_session,
+            Some(main),
+            "rejecting an unknown preset must not clear the active session"
+        );
+        let status = app.status.as_deref().unwrap_or_default();
+        assert!(
+            status.contains("unknown agent 'bogus'") && status.contains("codex"),
+            "status must name the rejected input and list valid presets, got: {status}"
+        );
+        assert!(
+            !cfg_path.exists(),
+            "a rejected switch must not persist the config"
         );
     }
 }

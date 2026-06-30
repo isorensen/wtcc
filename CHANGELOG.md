@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Per-worktree agent presets** (`A`): define named agents in the config
+  (`[[agents]]` with `name`/`cmd`) and pick one per worktree; the choice persists
+  and the agent restarts with the new command. Falls back to the existing
+  `agent_cmd` when no presets are defined, so old configs keep working. The picker
+  validates the typed name against the configured presets (which it lists), so a
+  typo can't silently select the wrong agent (#52).
 - **Rename a worktree's branch** (`b`): renames the branch via `git branch -m` and
   re-keys the agent's `tmux` session in place (`tmux rename-session`) so the running
   agent stays attached. The worktree directory does not move, so PR/CI and attention
