@@ -33,6 +33,8 @@ fn app_one_worktree() -> App {
         repos: vec![Repository {
             name: "demo-repo".to_string(),
             path: PathBuf::from("/tmp/wtcc-issue44-nonexistent"),
+            setup: None,
+            archive: None,
         }],
         agent_cmd: "claude".to_string(),
         notify: true,

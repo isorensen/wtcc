@@ -102,6 +102,77 @@ impl AttentionTracker {
     }
 }
 
+/// Builds the tmux argv that runs a USER-AUTHORED command verbatim as a single
+/// `sh -c <command>` element: `new-session -A -s <session_name> sh -c <command>`.
+/// The command is never split, quoted, or interpolated — the shell parses it, not
+/// wtcc. This is the sole sanctioned `sh -c` seam, pinned by unit tests.
+pub fn script_argv(session_name: &str, command: &str) -> Vec<String> {
+    vec![
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        session_name.to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        command.to_string(),
+    ]
+}
+
+/// The `wtcc-setup-<slug>` tmux session name for a branch's one-off setup run.
+pub fn setup_session_name(branch: &str) -> String {
+    format!("wtcc-setup-{}", crate::worktree::slugify(branch))
+}
+
+/// Fire-and-forget: runs a user-authored setup command once in `cwd` via a tmux
+/// session, inside a PTY so the `-A` attach has a terminal. The command is a
+/// single verbatim `sh -c` argv element (see [`script_argv`]); the worktree path
+/// is passed via the PTY's cwd, never interpolated. Best-effort: every failure
+/// (no tmux, openpty error, bad command) is swallowed so worktree creation never
+/// blocks. A background thread keeps the PTY alive until the command exits.
+pub fn spawn_setup(branch: &str, command: &str, cwd: &Path) {
+    let name = setup_session_name(branch);
+    // A prior crash may have left a stale `wtcc-setup-<slug>` session; `-A` would
+    // silently reattach to it instead of running fresh. Best-effort kill first.
+    let _ = std::process::Command::new("tmux")
+        .args(["kill-session", "-t", &name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut cmd = CommandBuilder::new("tmux");
+    for arg in script_argv(&name, command) {
+        cmd.arg(arg);
+    }
+    cmd.cwd(cwd);
+    let Ok(pty) = native_pty_system().openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) else {
+        return;
+    };
+    let Ok(mut child) = pty.slave.spawn_command(cmd) else {
+        return;
+    };
+    drop(pty.slave);
+    let Ok(mut reader) = pty.master.try_clone_reader() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        // Hold the master and child until the tmux attach client exits (the
+        // command finishes and the session ends), so the session is created and
+        // the command runs to completion before everything is torn down.
+        let _master = pty.master;
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+        }
+        let _ = child.wait();
+    });
+}
+
 /// A single agent terminal: a PTY running a `tmux new-session -A` attach child,
 /// with a background reader thread feeding bytes into a vt100 parser.
 pub struct Session {
@@ -454,6 +525,56 @@ mod tests {
         assert_eq!(
             SessionManager::session_name("Feature/Foo Bar"),
             "wtcc-feature-foo-bar"
+        );
+    }
+
+    // --- issue #49: lifecycle-script seams (pure, no IO) ---------------------
+    //
+    // TDD RED: `script_argv` is the security-critical seam for the SETUP run. It
+    // builds the argv passed to `tmux`, where the user command MUST be a single,
+    // verbatim, un-split argv element (`tmux new-session -A -s <name> sh -c
+    // <command>`). `setup_session_name` slug-prefixes the branch for the
+    // `wtcc-setup-<slug>` session.
+
+    #[test]
+    fn script_argv_wraps_command_in_tmux_attach_plus_sh_dash_c() {
+        let argv = script_argv("wtcc-setup-feature-foo", "npm install");
+        assert_eq!(
+            argv,
+            vec![
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "wtcc-setup-feature-foo".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                "npm install".to_string(),
+            ]
+        );
+        // The session name is one arg and the command is exactly one arg.
+        assert_eq!(argv.len(), 7);
+        assert_eq!(argv[3], "wtcc-setup-feature-foo");
+        assert_eq!(argv[4], "sh");
+        assert_eq!(argv[5], "-c");
+    }
+
+    #[test]
+    fn script_argv_keeps_command_as_one_element_with_spaces_quotes_and_operators() {
+        // Security contract: a command containing whitespace, shell operators,
+        // and quotes is NEVER split or interpolated — it stays a single argv
+        // element so the shell (not wtcc) parses it.
+        let cmd = "echo \"hi there\" && rm -rf /tmp/x ; pwd > 'a b'";
+        let argv = script_argv("wtcc-setup-x", cmd);
+        assert_eq!(argv.len(), 7, "extra args mean the command was split");
+        assert_eq!(argv[6], cmd, "command must be passed through verbatim");
+    }
+
+    #[test]
+    fn setup_session_name_is_slug_prefixed() {
+        assert_eq!(setup_session_name("Feature/Foo"), "wtcc-setup-feature-foo");
+        assert_eq!(
+            setup_session_name("Feature/Foo Bar"),
+            "wtcc-setup-feature-foo-bar"
         );
     }
 

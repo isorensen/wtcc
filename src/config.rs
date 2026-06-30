@@ -92,6 +92,8 @@ mod tests {
             repos: vec![Repository {
                 name: "my-repo".to_string(),
                 path: PathBuf::from("/home/user/my-repo"),
+                setup: None,
+                archive: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -124,5 +126,55 @@ mod tests {
         // A config.toml written before #47 has no `notify` key.
         let cfg: Config = toml::from_str("agent_cmd = \"claude\"\n").unwrap();
         assert!(cfg.notify);
+    }
+
+    // --- issue #49: per-repo setup/archive lifecycle scripts ----------------
+    //
+    // TDD RED: the config is fully additive/back-compatible. A repos entry
+    // written before #49 has no `setup`/`archive` keys and must load with both
+    // `None` (serde default); when a script is unset it must be omitted on save
+    // (skip_serializing_if), and a populated entry must round-trip.
+
+    #[test]
+    fn legacy_repo_entry_without_lifecycle_fields_loads_as_none() {
+        let cfg: Config = toml::from_str(
+            "agent_cmd = \"claude\"\n[[repos]]\nname = \"demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.repos[0].setup, None);
+        assert_eq!(cfg.repos[0].archive, None);
+    }
+
+    #[test]
+    fn lifecycle_scripts_round_trip_and_none_is_omitted_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let original = Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                setup: Some("npm install".to_string()),
+                archive: None,
+            }],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+        };
+
+        original.save_to(&path).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serialized.contains("setup"),
+            "a populated setup must be serialized, got:\n{serialized}"
+        );
+        assert!(
+            !serialized.contains("archive"),
+            "a None archive must be omitted via skip_serializing_if, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.repos[0].setup.as_deref(), Some("npm install"));
+        assert_eq!(loaded.repos[0].archive, None);
     }
 }

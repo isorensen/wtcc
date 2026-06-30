@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 pub struct Repository {
     pub name: String,
     pub path: PathBuf,
+    /// User-authored command run once (best-effort) in the new worktree after it
+    /// is created. Absent in legacy configs and omitted from output when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// User-authored command run in the worktree just before it is removed.
+    /// Absent in legacy configs and omitted from output when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -32,7 +40,12 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    Ok(Repository { name, path })
+    Ok(Repository {
+        name,
+        path,
+        setup: None,
+        archive: None,
+    })
 }
 
 #[cfg(test)]
