@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Per-repo base ref** for new worktrees: set `base_ref` on a repo in the config
+  and new-branch worktrees start from that ref (`git worktree add -b <branch>
+  <path> <base_ref>`) instead of `HEAD`. Unset → unchanged behavior (#54).
 - **Archive worktrees** (`x` to archive/unarchive, `X` to show/hide archived):
   soft-hides a worktree from the sidebar without touching git or disk. Archived
   rows are dimmed when shown and skipped by `j`/`k` navigation when hidden, so

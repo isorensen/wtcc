@@ -19,6 +19,11 @@ pub struct Repository {
     /// from output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archived: Vec<PathBuf>,
+    /// Start-point for NEW-branch worktrees (e.g. `origin/main`). When set, a new
+    /// branch forks from this ref instead of HEAD. Absent in legacy configs and
+    /// omitted from output when unset; edited by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -51,6 +56,7 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         setup: None,
         archive: None,
         archived: Vec::new(),
+        base_ref: None,
     })
 }
 

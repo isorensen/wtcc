@@ -50,6 +50,7 @@ fn app_with_presets() -> App {
             setup: None,
             archive: None,
             archived: Vec::new(),
+            base_ref: None,
         }],
         agents: vec![
             preset("claude", "claude"),
