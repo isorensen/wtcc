@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
+use crate::pr::MergeStrategy;
 use crate::repository::Repository;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -15,6 +16,10 @@ pub struct Config {
     /// goes quiet and needs input. Defaults to `true`; absent in legacy configs.
     #[serde(default = "default_notify")]
     pub notify: bool,
+    /// Strategy used by the "Merge PR" action. Defaults to `Squash`; absent in
+    /// legacy configs.
+    #[serde(default)]
+    pub merge_strategy: MergeStrategy,
 }
 
 fn default_agent_cmd() -> String {
@@ -31,6 +36,7 @@ impl Default for Config {
             repos: Vec::new(),
             agent_cmd: default_agent_cmd(),
             notify: default_notify(),
+            merge_strategy: MergeStrategy::default(),
         }
     }
 }
@@ -97,6 +103,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: MergeStrategy::default(),
         };
 
         original.save_to(&path).unwrap();
@@ -159,6 +166,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: MergeStrategy::default(),
         };
 
         original.save_to(&path).unwrap();

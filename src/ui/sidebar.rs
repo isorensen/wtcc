@@ -250,6 +250,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
         });
         app.selected_repo = Some(0);
         app.worktrees = vec![Worktree {

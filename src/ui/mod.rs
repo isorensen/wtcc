@@ -193,6 +193,12 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
         Confirm::RestartAgent(branch) => {
             format!("Restart agent for {branch}? (y/n)")
         }
+        Confirm::MergePr(branch) => {
+            format!("Merge PR for {branch}? (y/n)")
+        }
+        Confirm::ClosePr(branch) => {
+            format!("Close PR for {branch}? (y/n)")
+        }
     };
     Paragraph::new(text)
         .wrap(Wrap { trim: true })
@@ -293,6 +299,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
         });
         app.worktrees = vec![Worktree {
             path: PathBuf::from("/tmp/demo-repo/main"),

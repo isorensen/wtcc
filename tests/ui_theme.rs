@@ -38,6 +38,7 @@ fn app_one_worktree() -> App {
         }],
         agent_cmd: "claude".to_string(),
         notify: true,
+        merge_strategy: wtcc::pr::MergeStrategy::default(),
     });
     app.selected_repo = Some(0);
     app.worktrees = vec![Worktree {
