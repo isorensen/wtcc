@@ -16,6 +16,19 @@ const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a 
 pub(crate) const SIDEBAR_WIDTH: u16 = 34;
 pub(crate) const STATUS_HEIGHT: u16 = 1;
 
+/// Border style for a pane given whether it currently has focus. The focused
+/// pane gets a distinct, bold border (`theme.border_focus`) as the focus cue;
+/// unfocused panes use the dim `theme.border`.
+pub(crate) fn pane_border_style(theme: &crate::theme::Theme, focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(theme.border_focus)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     render(app, area, frame.buffer_mut());
@@ -43,7 +56,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         Overlay::Palette { query, selected } => render_palette(query, *selected, area, buf),
         Overlay::Input { prompt, buffer } => render_input(prompt, buffer, area, buf),
         Overlay::Confirm(confirm) => render_confirm(app, confirm, area, buf),
-        Overlay::Help => render_help(area, buf),
+        Overlay::Help => render_help(app, area, buf),
     }
 }
 
@@ -52,7 +65,10 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
         Some(wt) if !wt.branch.is_empty() => format!(" agent · {} ", wt.branch),
         _ => " agent ".to_string(),
     };
-    let block = Block::default().title(title).borders(Borders::ALL);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(pane_border_style(&app.theme, app.focus == Focus::Agent));
     let session = app
         .active_session
         .as_deref()
@@ -183,11 +199,11 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
         .render(inner, buf);
 }
 
-fn render_help(area: Rect, buf: &mut Buffer) {
+fn render_help(app: &App, area: Rect, buf: &mut Buffer) {
     use crate::keymap::{self, AGENT, PRIMARY};
 
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let key_style = Style::default().fg(ratatui::style::Color::Cyan);
+    let key_style = Style::default().fg(app.theme.accent);
 
     let row = |keys: &str, label: &str| {
         Line::from(vec![

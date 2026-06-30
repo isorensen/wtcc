@@ -4,6 +4,7 @@ pub mod event;
 pub mod keymap;
 pub mod repository;
 pub mod session;
+pub mod theme;
 pub mod ui;
 pub mod vcs;
 pub mod worktree;
