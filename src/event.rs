@@ -256,6 +256,8 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
                 Confirm::RemoveWorktree(path) => app.remove_worktree(&path),
                 Confirm::RemoveRepo(index) => app.remove_repository(index),
                 Confirm::RestartAgent(branch) => app.restart_agent(&branch),
+                Confirm::MergePr(branch) => app.pr_merge_branch(&branch),
+                Confirm::ClosePr(branch) => app.pr_close_branch(&branch),
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.overlay = Overlay::None,
@@ -312,6 +314,20 @@ fn request_restart_agent(app: &mut App) {
     }
 }
 
+fn request_merge_pr(app: &mut App) {
+    match app.pr_target() {
+        Ok((branch, _)) => app.overlay = Overlay::Confirm(Confirm::MergePr(branch)),
+        Err(msg) => app.status = Some(msg),
+    }
+}
+
+fn request_close_pr(app: &mut App) {
+    match app.pr_target() {
+        Ok((branch, _)) => app.overlay = Overlay::Confirm(Confirm::ClosePr(branch)),
+        Err(msg) => app.status = Some(msg),
+    }
+}
+
 /// Executes a resolved [`Action`], whether it came from a key dispatch or the
 /// command palette. The single place that maps semantic actions to app effects.
 fn run_action(app: &mut App, action: Action) {
@@ -330,6 +346,10 @@ fn run_action(app: &mut App, action: Action) {
         Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),
         Action::Refresh => app.refresh_worktrees(),
+        Action::OpenPrWeb => app.pr_open_in_browser(),
+        Action::MarkReady => app.pr_mark_ready(),
+        Action::MergePr => request_merge_pr(app),
+        Action::ClosePr => request_close_pr(app),
         Action::Quit => app.should_quit = true,
     }
 }
@@ -357,6 +377,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
         });
         app.status = None;
         app.worktrees = vec![Worktree {

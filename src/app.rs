@@ -106,6 +106,10 @@ pub enum Confirm {
     /// Restart the agent for the named branch (kill its tmux session; a fresh
     /// agent respawns on the next frame). The branch is shown in the prompt.
     RestartAgent(String),
+    /// Merge the PR for the named branch. Destructive, so confirm-gated.
+    MergePr(String),
+    /// Close the PR for the named branch. Destructive, so confirm-gated.
+    ClosePr(String),
 }
 
 /// The active modal overlay, if any. Only one overlay is open at a time.
@@ -606,6 +610,113 @@ impl App {
         }
         self.status = Some(format!("restarting agent for {branch}"));
     }
+
+    /// Resolves the `(branch, path)` of the selected worktree's PR, or an error
+    /// message describing why no PR action can run: no worktree selected, or the
+    /// selected worktree has no cached PR. The branch is the discrete argument
+    /// every `gh` PR action takes.
+    pub(crate) fn pr_target(&self) -> Result<(String, PathBuf), String> {
+        let branch = match self.current_worktree() {
+            Some(wt) => wt.branch.clone(),
+            None => return Err("no worktree selected".to_string()),
+        };
+        let path = self.pr_target_for(&branch)?;
+        Ok((branch, path))
+    }
+
+    /// Resolves the worktree path to run `gh` in for `branch`'s PR, re-checking
+    /// the cached PR. Used by the confirm executors, which carry a pre-captured
+    /// branch: this re-validates against current state so a stale confirm (the PR
+    /// vanished between opening the dialog and confirming) guards out cleanly.
+    fn pr_target_for(&self, branch: &str) -> Result<PathBuf, String> {
+        let Some(wt) = self.worktrees.iter().find(|w| w.branch == branch) else {
+            return Err(format!("no worktree for {branch}"));
+        };
+        match self.vcs_status.get(&wt.path).and_then(|s| s.pr) {
+            Some(_) => Ok(wt.path.clone()),
+            None => Err(format!("no PR for {branch}")),
+        }
+    }
+
+    /// Opens the selected worktree's PR in a browser (`gh pr view --web`). Runs
+    /// immediately (no confirm). Guards and any `gh` failure land in `status`.
+    /// Opens nothing on the `gh` side, so it never refreshes the cached status.
+    pub fn pr_open_in_browser(&mut self) {
+        self.status = Some(match self.pr_target() {
+            Ok((branch, path)) => {
+                match crate::pr::run_gh(&crate::pr::open_in_browser_argv(&branch), &path) {
+                    Ok(()) => format!("opening PR for {branch} in browser"),
+                    Err(e) => format!("could not open PR for {branch}: {e}"),
+                }
+            }
+            Err(msg) => msg,
+        });
+    }
+
+    /// Marks the selected worktree's draft PR ready (`gh pr ready`). Immediate,
+    /// no confirm. On success the cached VCS status is refreshed so the sidebar
+    /// PR badge reflects the new state. Guards and any `gh` failure land in
+    /// `status`.
+    pub fn pr_mark_ready(&mut self) {
+        let status = match self.pr_target() {
+            Ok((branch, path)) => {
+                match crate::pr::run_gh(&crate::pr::mark_ready_argv(&branch), &path) {
+                    Ok(()) => {
+                        self.spawn_vcs_refresh();
+                        format!("marked PR ready for {branch}")
+                    }
+                    Err(e) => format!("could not mark PR ready for {branch}: {e}"),
+                }
+            }
+            Err(msg) => msg,
+        };
+        self.status = Some(status);
+    }
+
+    /// Merges `branch`'s PR (`gh pr merge --<strategy>`). The executor the merge
+    /// confirm dispatches into with its pre-captured branch. On success the
+    /// cached VCS status is refreshed so the sidebar PR badge updates. Guards and
+    /// any `gh` failure land in `status`.
+    pub fn pr_merge_branch(&mut self, branch: &str) {
+        let path = match self.pr_target_for(branch) {
+            Ok(path) => path,
+            Err(msg) => {
+                self.status = Some(msg);
+                return;
+            }
+        };
+        let strategy = self.config.merge_strategy;
+        let status = match crate::pr::run_gh(&crate::pr::merge_argv(branch, strategy), &path) {
+            Ok(()) => {
+                self.spawn_vcs_refresh();
+                format!("merged PR for {branch}")
+            }
+            Err(e) => format!("merge failed for {branch}: {e}"),
+        };
+        self.status = Some(status);
+    }
+
+    /// Closes `branch`'s PR (`gh pr close`). The executor the close confirm
+    /// dispatches into with its pre-captured branch. On success the cached VCS
+    /// status is refreshed so the sidebar PR badge updates. Guards and any `gh`
+    /// failure land in `status`.
+    pub fn pr_close_branch(&mut self, branch: &str) {
+        let path = match self.pr_target_for(branch) {
+            Ok(path) => path,
+            Err(msg) => {
+                self.status = Some(msg);
+                return;
+            }
+        };
+        let status = match crate::pr::run_gh(&crate::pr::close_argv(branch), &path) {
+            Ok(()) => {
+                self.spawn_vcs_refresh();
+                format!("closed PR for {branch}")
+            }
+            Err(e) => format!("close failed for {branch}: {e}"),
+        };
+        self.status = Some(status);
+    }
 }
 
 #[cfg(test)]
@@ -660,6 +771,7 @@ mod tests {
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
         }
     }
 
@@ -851,6 +963,7 @@ mod tests {
                 ],
                 agent_cmd: "claude".to_string(),
                 notify: true,
+                merge_strategy: crate::pr::MergeStrategy::default(),
             },
             selected_repo: Some(1),
             worktrees: Vec::new(),

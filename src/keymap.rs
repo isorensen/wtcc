@@ -27,13 +27,17 @@ pub enum Action {
     JumpAttention,
     SwitchRepo,
     Refresh,
+    OpenPrWeb,
+    MarkReady,
+    MergePr,
+    ClosePr,
     Quit,
 }
 
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 19] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -48,6 +52,10 @@ impl Action {
         Action::JumpAttention,
         Action::SwitchRepo,
         Action::Refresh,
+        Action::OpenPrWeb,
+        Action::MarkReady,
+        Action::MergePr,
+        Action::ClosePr,
         Action::Quit,
     ];
 
@@ -70,6 +78,10 @@ impl Action {
             Action::JumpAttention => "Jump to attention",
             Action::SwitchRepo => "Switch repo",
             Action::Refresh => "Refresh",
+            Action::OpenPrWeb => "Open PR in browser",
+            Action::MarkReady => "Mark PR ready",
+            Action::MergePr => "Merge PR",
+            Action::ClosePr => "Close PR",
             Action::Quit => "Quit",
         }
     }
@@ -87,6 +99,10 @@ impl Action {
                 | Action::JumpAttention
                 | Action::SwitchRepo
                 | Action::Refresh
+                | Action::OpenPrWeb
+                | Action::MarkReady
+                | Action::MergePr
+                | Action::ClosePr
                 | Action::Quit
         )
     }
@@ -186,6 +202,14 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('r'))],
         action: Action::Refresh,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('o'))],
+        action: Action::OpenPrWeb,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('m'))],
+        action: Action::MergePr,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char(':')), Chord::ctrl('p')],

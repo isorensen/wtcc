@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **GitHub PR write actions** via `gh`: open the PR in the browser (`o`), mark a
+  draft ready, merge (`m`), and close — all from the palette, with merge/close
+  behind a confirm overlay. Merge strategy is per-repo (`merge_strategy`, default
+  `squash`). All `gh` calls are argv-only; PR creation and diff view are out of
+  scope (#50).
 - Per-repo **lifecycle scripts**: an optional `setup` command runs once in a new
   worktree on creation, and an optional `archive` command runs in the worktree
   before it is removed (bounded by a timeout so a hanging script can't block
