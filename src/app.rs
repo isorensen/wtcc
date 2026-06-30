@@ -71,6 +71,26 @@ pub fn run_archive(command: &str, cwd: &Path, timeout: Duration) -> ArchiveOutco
     }
 }
 
+/// Runs a USER-AUTHORED setup command once via `sh -c <command>` in `cwd`,
+/// detached on a background thread so worktree creation never blocks on it.
+/// SECURITY: the command is passed as a single, un-interpolated argv element and
+/// `cwd` is set with `current_dir` — the worktree path is never string-built into
+/// the command. Best-effort: a spawn failure is swallowed and the child is reaped
+/// inside the thread by `.status()` (which waits off the UI thread).
+pub fn spawn_setup(command: &str, cwd: &Path) {
+    let command = command.to_string();
+    let cwd = cwd.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&cwd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
 /// What the user is being prompted for while an inline input overlay is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Prompt {
@@ -441,7 +461,7 @@ impl App {
                     .and_then(|r| r.setup.clone())
                 {
                     self.status = Some(format!("added worktree {branch}; running setup…"));
-                    crate::session::spawn_setup(branch, &setup, &new_path);
+                    spawn_setup(&setup, &new_path);
                 } else {
                     self.status = Some(format!("added worktree {branch}"));
                 }
@@ -528,9 +548,9 @@ impl App {
             self.status = Some("no repo selected".to_string());
             return;
         };
-        // Spec ordering: kill agent session -> archive -> kill setup session ->
-        // git remove. The agent is reaped first so it is quiescent before the
-        // archive runs (it can't be writing files mid-archive).
+        // Spec ordering: kill agent session -> archive -> git remove. The agent
+        // is reaped first so it is quiescent before the archive runs (it can't be
+        // writing files mid-archive).
         let branch = self
             .worktrees
             .iter()
@@ -559,15 +579,6 @@ impl App {
                 ArchiveOutcome::Failed => Some("archive failed"),
                 ArchiveOutcome::TimedOut => Some("archive timed out"),
             });
-        // Kill the one-off `wtcc-setup-<slug>` session before git remove.
-        // `spawn_setup` uses `tmux new-session -A`, which ATTACHES to an existing
-        // session of the same name; a stale setup session would be silently
-        // re-attached (not recreated) if the branch is re-created later, so its
-        // setup command would never run. Best-effort.
-        if let Some(branch) = branch.as_deref() {
-            let setup_name = crate::session::setup_session_name(branch);
-            self.session_manager.kill(&setup_name);
-        }
         match worktree::remove(&repo, path) {
             Ok(()) => {
                 // `refresh_worktrees` clears `status` on success, so set the
@@ -771,28 +782,6 @@ mod tests {
         assert_eq!(
             app.active_session, None,
             "active_session must clear when the removed worktree was the active one"
-        );
-    }
-
-    #[test]
-    fn remove_worktree_kills_setup_session_so_recreate_reruns_setup() {
-        use portable_pty::CommandBuilder;
-
-        let mut app = app_with_fake_worktrees();
-        let setup = crate::session::setup_session_name("feat");
-        let mut s = CommandBuilder::new("printf");
-        s.args(["s"]);
-        app.session_manager
-            .insert_spawned(&setup, s, &std::env::temp_dir(), 24, 80)
-            .unwrap();
-
-        app.remove_worktree(&PathBuf::from("/repo/feat"));
-
-        assert!(
-            app.session_manager.get(&setup).is_none(),
-            "removing a worktree must kill its wtcc-setup-<slug> session so a \
-             re-create on the same branch runs a fresh setup instead of \
-             re-attaching the stale one via `tmux new-session -A`"
         );
     }
 

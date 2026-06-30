@@ -7,7 +7,7 @@
 //!   - A non-zero archive does NOT block removal.
 //!   - A hanging archive is killed at the timeout and removal still proceeds.
 //!   - The no-script path is unchanged.
-//!   - SETUP (tmux-gated) runs once in the new worktree dir on create.
+//!   - SETUP runs once in the new worktree dir on create (detached `sh -c`).
 //!
 //! No production code lives here; the file is expected to FAIL TO COMPILE until
 //! `Repository::{setup,archive}`, `app::run_archive`, `app::ArchiveOutcome`, and
@@ -24,14 +24,6 @@ use wtcc::config::Config;
 fn git_available() -> bool {
     Command::new("git")
         .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -254,12 +246,14 @@ fn add_worktree_status_reports_setup_only_when_configured() {
     );
 }
 
-/// SETUP runs once in the new worktree dir on create (tmux-gated): the script
-/// touches a marker INSIDE the worktree, proving cwd = the new worktree.
+/// SETUP runs once in the new worktree dir on create: the detached `sh -c`
+/// touches a marker INSIDE the worktree, proving cwd = the new worktree. No tmux
+/// is involved, so this is reliable in headless CI; the poll loop absorbs the
+/// async run.
 #[test]
 fn setup_runs_in_new_worktree_on_create() {
-    if !git_available() || !tmux_available() {
-        eprintln!("skipping: git or tmux not available on PATH");
+    if !git_available() {
+        eprintln!("skipping: git not available on PATH");
         return;
     }
 
