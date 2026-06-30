@@ -2,35 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 use crate::app::{App, Confirm, Focus, Overlay, Prompt};
+use crate::keymap::{self, AGENT, Action, PRIMARY};
 use crate::repository::Repository;
-use crate::ui::palette::{self, Command};
+use crate::ui::palette;
 use crate::ui::sidebar::{self, SidebarRow};
 use crate::ui::{SIDEBAR_WIDTH, STATUS_HEIGHT};
 use crate::worktree::Worktree;
-
-/// Keybindings shown in the `?` help overlay, grouped by focus. Kept next to
-/// the keymap (`handle_primary`/`handle_agent`) so a binding change here is an
-/// obvious prompt to update the help — there is no reflection, just one table.
-pub const HELP_SIDEBAR: &[(&str, &str)] = &[
-    ("j/k", "move selection"),
-    ("Tab", "focus agent"),
-    ("a", "register repo"),
-    ("D", "unregister repo"),
-    ("n", "add worktree (new/existing branch)"),
-    ("d", "remove worktree"),
-    ("R", "restart agent"),
-    ("r", "refresh"),
-    (": / Ctrl-P", "command palette"),
-    ("?", "help"),
-    ("q / Ctrl-Q", "quit"),
-];
-
-pub const HELP_AGENT: &[(&str, &str)] = &[
-    ("(keys)", "forwarded to the agent"),
-    ("Ctrl-O", "back to sidebar"),
-    ("Ctrl-C", "forwarded to the agent"),
-    ("Ctrl-Q", "quit"),
-];
 
 /// Applies a key event to the app, dispatching to the active overlay first and
 /// falling back to the primary keymap. Pure state transition: no terminal I/O.
@@ -62,7 +39,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if app.focus == Focus::Agent {
                 handle_agent(app, key, ctrl);
             } else {
-                handle_primary(app, key, ctrl);
+                handle_primary(app, key);
             }
         }
         Overlay::Palette { .. } => handle_palette(app, key),
@@ -152,8 +129,9 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
 }
 
 fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
-    // Ctrl-O returns focus to the sidebar (not forwarded).
-    if ctrl && matches!(key.code, KeyCode::Char('o')) {
+    // Ctrl-O returns focus to the sidebar (not forwarded); every other key
+    // falls through to the agent's PTY.
+    if matches!(keymap::dispatch(AGENT, key), Some(Action::FocusSidebar)) {
         app.toggle_focus();
         return;
     }
@@ -187,26 +165,9 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
     let _ = session.write_input(&bytes);
 }
 
-fn handle_primary(app: &mut App, key: KeyEvent, ctrl: bool) {
-    if ctrl && matches!(key.code, KeyCode::Char('p')) {
-        open_palette(app);
-        return;
-    }
-
-    match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char(':') => open_palette(app),
-        KeyCode::Char('j') | KeyCode::Down => app.next(),
-        KeyCode::Char('k') | KeyCode::Up => app.prev(),
-        KeyCode::Tab => app.toggle_focus(),
-        KeyCode::Char('r') => app.refresh_worktrees(),
-        KeyCode::Char('a') => open_register_prompt(app),
-        KeyCode::Char('n') => open_add_prompt(app),
-        KeyCode::Char('d') => request_remove(app),
-        KeyCode::Char('D') => request_remove_repo(app),
-        KeyCode::Char('R') => request_restart_agent(app),
-        KeyCode::Char('?') => app.overlay = Overlay::Help,
-        _ => {}
+fn handle_primary(app: &mut App, key: KeyEvent) {
+    if let Some(action) = keymap::dispatch(PRIMARY, key) {
+        run_action(app, action);
     }
 }
 
@@ -235,8 +196,8 @@ fn handle_palette(app: &mut App, key: KeyEvent) {
             let matches = palette::filter(query);
             let chosen = matches.get(*selected).copied();
             app.overlay = Overlay::None;
-            if let Some(cmd) = chosen {
-                run_command(app, cmd);
+            if let Some(action) = chosen {
+                run_action(app, action);
             }
         }
         _ => {}
@@ -334,16 +295,24 @@ fn request_restart_agent(app: &mut App) {
     }
 }
 
-fn run_command(app: &mut App, cmd: Command) {
-    match cmd {
-        Command::AddRepo => open_register_prompt(app),
-        Command::RemoveRepo => request_remove_repo(app),
-        Command::AddWorktree => open_add_prompt(app),
-        Command::RemoveWorktree => request_remove(app),
-        Command::RestartAgent => request_restart_agent(app),
-        Command::SwitchRepo => app.cycle_repo(),
-        Command::Refresh => app.refresh_worktrees(),
-        Command::Quit => app.should_quit = true,
+/// Executes a resolved [`Action`], whether it came from a key dispatch or the
+/// command palette. The single place that maps semantic actions to app effects.
+fn run_action(app: &mut App, action: Action) {
+    match action {
+        Action::Next => app.next(),
+        Action::Prev => app.prev(),
+        Action::ToggleFocus => app.toggle_focus(),
+        Action::OpenPalette => open_palette(app),
+        Action::Help => app.overlay = Overlay::Help,
+        Action::FocusSidebar => app.toggle_focus(),
+        Action::AddRepo => open_register_prompt(app),
+        Action::RemoveRepo => request_remove_repo(app),
+        Action::AddWorktree => open_add_prompt(app),
+        Action::RemoveWorktree => request_remove(app),
+        Action::RestartAgent => request_restart_agent(app),
+        Action::SwitchRepo => app.cycle_repo(),
+        Action::Refresh => app.refresh_worktrees(),
+        Action::Quit => app.should_quit = true,
     }
 }
 

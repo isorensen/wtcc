@@ -10,6 +10,13 @@ All notable changes to this project are documented here. The format is based on
 - **Roadmap** section in the README documenting the v0.6.0–v0.8.0 release plan
   (feature parity with Supacode, organized by milestone).
 
+### Changed
+- Refactored the keymap into a single data-driven source of truth (`src/keymap.rs`):
+  key dispatch, the help overlay, the statusbar hints, and the command palette are
+  all derived from one binding table, so they can no longer drift. Adds a collision
+  test and a completeness-by-construction help overlay. No user-visible behavior
+  change (#43).
+
 ## [0.5.0] - 2026-06-22
 
 ### Added
