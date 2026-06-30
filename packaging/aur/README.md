@@ -11,6 +11,10 @@ Runtime deps: `git`, `tmux`. Optional: `github-cli` (PR/CI badges), `claude-code
 
 ## Publishing a new version to the AUR
 
+> **On every release**, `pkgver` in `PKGBUILD` must be bumped to the new `vX.Y.Z` and the
+> checksum + `.SRCINFO` regenerated (steps 2–3 below). This is part of the release checklist —
+> keep the in-repo `PKGBUILD`/`.SRCINFO` in sync with the latest tag so it never drifts.
+
 The AUR package lives in a separate git repo on `aur.archlinux.org` under your account; it is
 **not** pushed automatically from this repo. To publish (run on your Arch machine with your AUR
 SSH key configured — the same setup you used for `hyprflow`):
