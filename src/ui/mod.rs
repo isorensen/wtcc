@@ -274,6 +274,7 @@ mod tests {
                 path: PathBuf::from("/tmp/demo-repo"),
             }],
             agent_cmd: "claude".to_string(),
+            notify: true,
         });
         app.worktrees = vec![Worktree {
             path: PathBuf::from("/tmp/demo-repo/main"),

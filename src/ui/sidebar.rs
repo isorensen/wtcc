@@ -113,7 +113,10 @@ fn worktree_line<'a>(
 
     let mut spans = vec![
         Span::raw("  "),
-        activity_span(app.worktree_activity(&wt.branch)),
+        activity_span(
+            app.worktree_activity(&wt.branch),
+            app.attention_for(&wt.branch),
+        ),
         Span::raw(format!("{glyph} ")),
         Span::styled(label, style),
     ];
@@ -137,7 +140,14 @@ fn worktree_line<'a>(
 /// the selected/branch columns stay aligned regardless of state. `None` renders
 /// a blank cell. Diamonds are used (not dots) so the activity marker is not
 /// confused with the adjacent selection marker (`●`/`○`).
-fn activity_span<'a>(state: ActivityState) -> Span<'a> {
+///
+/// When `attention` is set the cell becomes a bold attention marker (`◈`),
+/// distinct from every plain glyph, reusing the same fixed-width column so the
+/// layout never shifts.
+fn activity_span<'a>(state: ActivityState, attention: bool) -> Span<'a> {
+    if attention {
+        return Span::styled("◈", Style::default().add_modifier(Modifier::BOLD));
+    }
     match state {
         ActivityState::Working => Span::styled("◆", Style::default().add_modifier(Modifier::BOLD)),
         ActivityState::Idle => Span::styled("◇", Style::default().add_modifier(Modifier::DIM)),
@@ -149,4 +159,98 @@ fn short_path(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::repository::Repository;
+    use crate::session::{ATTENTION_QUIET, SessionManager, WORKING_WINDOW};
+    use crate::worktree::Worktree;
+    use std::path::PathBuf;
+
+    fn glyph(span: Span) -> String {
+        span.content.into_owned()
+    }
+
+    /// The attention flag must produce a marker distinct from the plain
+    /// activity glyph for the same state — it reuses the same fixed-width cell.
+    #[test]
+    fn activity_span_attention_marker_is_distinct_from_plain_glyph() {
+        for state in [
+            ActivityState::Working,
+            ActivityState::Idle,
+            ActivityState::None,
+        ] {
+            assert_ne!(
+                glyph(activity_span(state, false)),
+                glyph(activity_span(state, true)),
+                "attention marker must differ from the plain {state:?} glyph"
+            );
+        }
+    }
+
+    /// Without the flag, the existing glyphs are unchanged (no layout drift).
+    #[test]
+    fn activity_span_plain_glyphs_are_unchanged() {
+        assert_eq!(glyph(activity_span(ActivityState::Working, false)), "◆");
+        assert_eq!(glyph(activity_span(ActivityState::Idle, false)), "◇");
+        assert_eq!(glyph(activity_span(ActivityState::None, false)), " ");
+    }
+
+    #[test]
+    fn activity_span_attention_marker_is_bold() {
+        let span = activity_span(ActivityState::Idle, true);
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "attention marker should be bold"
+        );
+    }
+
+    #[test]
+    fn render_shows_attention_marker_for_a_flagged_worktree() {
+        let mut app = App::new(Config {
+            repos: vec![Repository {
+                name: "r".to_string(),
+                path: PathBuf::from("/tmp/wtcc-sidebar-attn-none"),
+            }],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+        });
+        app.selected_repo = Some(0);
+        app.worktrees = vec![Worktree {
+            path: PathBuf::from("/r/feat"),
+            branch: "feat".to_string(),
+            head: "def".to_string(),
+            is_bare: false,
+            is_detached: false,
+        }];
+        app.selected_worktree = Some(0);
+
+        // Give feat a real (exited) session and let it fall to Idle.
+        let name = SessionManager::session_name("feat");
+        let mut cmd = portable_pty::CommandBuilder::new("printf");
+        cmd.args(["x"]);
+        app.session_manager
+            .insert_spawned(&name, cmd, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        std::thread::sleep(WORKING_WINDOW + std::time::Duration::from_millis(200));
+
+        // Flag feat through the tracker (independent of the real session clock).
+        app.attention
+            .poll(&[(name.clone(), std::time::Duration::ZERO)], None);
+        app.attention.poll(&[(name, ATTENTION_QUIET)], None);
+
+        let area = Rect::new(0, 0, 34, 8);
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        let marker = glyph(activity_span(ActivityState::Idle, true));
+        assert!(
+            text.contains(&marker),
+            "flagged worktree should render the attention marker {marker:?}"
+        );
+    }
 }

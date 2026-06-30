@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,74 @@ pub fn activity_from_idle(idle: Option<Duration>) -> ActivityState {
         None => ActivityState::None,
         Some(d) if d < WORKING_WINDOW => ActivityState::Working,
         Some(_) => ActivityState::Idle,
+    }
+}
+
+/// How long a session must stay quiet before it counts as needing attention.
+/// The same fixed threshold for every session — intentionally not configurable.
+pub const ATTENTION_QUIET: Duration = Duration::from_secs(10);
+
+/// Coarse busy/quiet classification used by [`AttentionTracker`]. A session is
+/// `Quiet` once it has been idle for at least [`ATTENTION_QUIET`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Busy,
+    Quiet,
+}
+
+fn phase(idle: Duration) -> Phase {
+    if idle >= ATTENTION_QUIET {
+        Phase::Quiet
+    } else {
+        Phase::Busy
+    }
+}
+
+/// Edge-triggered "needs attention" detector over per-session idle durations.
+///
+/// Pure and time-injected: callers feed a snapshot of `(session_name, idle)`
+/// pairs each poll, so the heuristic is unit-testable without a PTY clock. A
+/// session is flagged exactly once on the Busy→Quiet edge; it only re-fires
+/// after going Busy again. The currently active session is never flagged, and
+/// selecting a flagged session clears its marker. Names absent from a snapshot
+/// are pruned.
+#[derive(Debug, Default)]
+pub struct AttentionTracker {
+    phases: HashMap<String, Phase>,
+    needs: HashSet<String>,
+}
+
+impl AttentionTracker {
+    /// Folds a fresh snapshot into the tracker, returning the session names that
+    /// newly crossed the Busy→Quiet edge this poll (suppressing `active`).
+    pub fn poll(&mut self, snapshot: &[(String, Duration)], active: Option<&str>) -> Vec<String> {
+        let mut fired = Vec::new();
+        for (name, idle) in snapshot {
+            let next = phase(*idle);
+            let prev = self.phases.insert(name.clone(), next);
+            // The active session, or any session back to work, is not flagged.
+            if active == Some(name.as_str()) || next == Phase::Busy {
+                self.needs.remove(name);
+                continue;
+            }
+            if prev == Some(Phase::Busy) && self.needs.insert(name.clone()) {
+                fired.push(name.clone());
+            }
+        }
+        let present: HashSet<&str> = snapshot.iter().map(|(n, _)| n.as_str()).collect();
+        self.phases.retain(|k, _| present.contains(k.as_str()));
+        self.needs.retain(|k| present.contains(k.as_str()));
+        fired
+    }
+
+    /// Whether the session named `name` is currently flagged for attention.
+    pub fn needs(&self, name: &str) -> bool {
+        self.needs.contains(name)
+    }
+
+    /// How many sessions are currently flagged.
+    pub fn count(&self) -> usize {
+        self.needs.len()
     }
 }
 
@@ -223,6 +291,15 @@ impl SessionManager {
         activity_from_idle(self.sessions.get(name).map(Session::idle_for))
     }
 
+    /// Snapshot of `(session_name, idle_duration)` for every live session, fed
+    /// to [`AttentionTracker::poll`]. Cheap: one lock read per session.
+    pub fn idle_durations(&self) -> Vec<(String, Duration)> {
+        self.sessions
+            .iter()
+            .map(|(name, s)| (name.clone(), s.idle_for()))
+            .collect()
+    }
+
     pub fn resize_all(&self, rows: u16, cols: u16) {
         for s in self.sessions.values() {
             let _ = s.resize(rows, cols);
@@ -377,6 +454,175 @@ mod tests {
         assert_eq!(
             SessionManager::session_name("Feature/Foo Bar"),
             "wtcc-feature-foo-bar"
+        );
+    }
+
+    // --- issue #47: attention edge detection --------------------------------
+    //
+    // TDD RED: these pin the pure, time-injected `AttentionTracker` contract.
+    // `Phase`/`phase` are private to this module, so the tests live in-module.
+
+    fn snap(entries: &[(&str, Duration)]) -> Vec<(String, Duration)> {
+        entries
+            .iter()
+            .map(|(n, d)| ((*n).to_string(), *d))
+            .collect()
+    }
+
+    #[test]
+    fn phase_classifies_at_the_quiet_boundary() {
+        assert_eq!(phase(Duration::ZERO), Phase::Busy);
+        assert_eq!(
+            phase(ATTENTION_QUIET - Duration::from_millis(1)),
+            Phase::Busy
+        );
+        // Boundary: exactly the threshold counts as quiet.
+        assert_eq!(phase(ATTENTION_QUIET), Phase::Quiet);
+        // A poisoned-lock degradation surfaces as Duration::MAX -> quiet.
+        assert_eq!(phase(Duration::MAX), Phase::Quiet);
+    }
+
+    #[test]
+    fn poll_fires_once_on_busy_to_quiet_edge() {
+        let mut t = AttentionTracker::default();
+        // First sight Busy: establishes phase, no edge.
+        assert!(
+            t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None)
+                .is_empty()
+        );
+        // Busy -> Quiet edge: fires exactly once.
+        assert_eq!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None),
+            vec!["wtcc-a".to_string()]
+        );
+        assert!(t.needs("wtcc-a"));
+        assert_eq!(t.count(), 1);
+    }
+
+    #[test]
+    fn poll_does_not_fire_on_first_sight_quiet() {
+        // No prior Busy phase -> unknown->Quiet is not an edge.
+        let mut t = AttentionTracker::default();
+        assert!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None)
+                .is_empty()
+        );
+        assert!(!t.needs("wtcc-a"));
+    }
+
+    #[test]
+    fn poll_does_not_fire_on_quiet_to_quiet() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None);
+        assert!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn poll_does_not_fire_on_busy_to_busy() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        assert!(
+            t.poll(&snap(&[("wtcc-a", Duration::from_millis(1))]), None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn poll_does_not_fire_on_quiet_to_busy() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None);
+        // Going Busy again must not fire.
+        assert!(
+            t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn poll_refires_only_after_going_busy_again() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        assert_eq!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None),
+            vec!["wtcc-a".to_string()]
+        );
+        // Staying quiet does not refire.
+        assert!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None)
+                .is_empty()
+        );
+        // Back to Busy, then Quiet again: fires a second time.
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        assert_eq!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None),
+            vec!["wtcc-a".to_string()]
+        );
+    }
+
+    #[test]
+    fn poll_suppresses_the_active_session() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), Some("wtcc-a"));
+        // Edge to quiet while active -> never fires, never flagged.
+        assert!(
+            t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), Some("wtcc-a"))
+                .is_empty()
+        );
+        assert!(!t.needs("wtcc-a"));
+        assert_eq!(t.count(), 0);
+    }
+
+    #[test]
+    fn poll_clears_flag_when_session_becomes_active() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None);
+        assert!(t.needs("wtcc-a"));
+        // Selecting it (now active) clears its marker and decrements the count.
+        t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), Some("wtcc-a"));
+        assert!(!t.needs("wtcc-a"));
+        assert_eq!(t.count(), 0);
+    }
+
+    #[test]
+    fn poll_prunes_dead_session_names() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        t.poll(&snap(&[("wtcc-a", ATTENTION_QUIET)]), None);
+        assert!(t.needs("wtcc-a"));
+        // Absent from the snapshot -> pruned from both phases and the flag set.
+        assert!(t.poll(&snap(&[]), None).is_empty());
+        assert!(!t.needs("wtcc-a"));
+        assert_eq!(t.count(), 0);
+    }
+
+    #[test]
+    fn poll_with_duration_max_flags_at_most_once() {
+        let mut t = AttentionTracker::default();
+        t.poll(&snap(&[("wtcc-a", Duration::ZERO)]), None);
+        assert_eq!(
+            t.poll(&snap(&[("wtcc-a", Duration::MAX)]), None),
+            vec!["wtcc-a".to_string()]
+        );
+        assert!(t.poll(&snap(&[("wtcc-a", Duration::MAX)]), None).is_empty());
+    }
+
+    #[test]
+    fn idle_durations_lists_spawned_sessions() {
+        let mut mgr = SessionManager::new();
+        let mut a = CommandBuilder::new("printf");
+        a.args(["x"]);
+        mgr.insert_spawned("wtcc-x", a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        let durations = mgr.idle_durations();
+        assert!(
+            durations.iter().any(|(n, _)| n == "wtcc-x"),
+            "idle_durations must report each live session by name"
         );
     }
 }

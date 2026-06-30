@@ -11,8 +11,13 @@ const SIDEBAR_HINTS: &str =
 const AGENT_HINTS: &str = "keys go to the agent  Ctrl-O back to sidebar  Ctrl-Q quit";
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
+    let attention = app.attention_count();
     let line = match &app.status {
         Some(status) => Line::styled(status.clone(), Style::default().fg(Color::Yellow)),
+        None if attention > 0 => Line::styled(
+            format!("{attention} agent(s) need input — press g to jump"),
+            Style::default().fg(Color::Yellow),
+        ),
         None => {
             let hints = match app.focus {
                 Focus::Sidebar => SIDEBAR_HINTS,
@@ -63,5 +68,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- issue #47: aggregated attention count ------------------------------
+
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::repository::Repository;
+    use crate::session::{ATTENTION_QUIET, SessionManager};
+    use crate::worktree::Worktree;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use std::path::PathBuf;
+
+    fn app_with_flagged(branches: &[&str]) -> App {
+        let mut app = App::new(Config {
+            repos: vec![Repository {
+                name: "r".to_string(),
+                path: PathBuf::from("/tmp/wtcc-statusbar-attn-none"),
+            }],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+        });
+        app.status = None;
+        app.selected_repo = Some(0);
+        app.worktrees = branches
+            .iter()
+            .map(|b| Worktree {
+                path: PathBuf::from(format!("/r/{b}")),
+                branch: b.to_string(),
+                head: "h".to_string(),
+                is_bare: false,
+                is_detached: false,
+            })
+            .collect();
+        // No active selection so the flags persist.
+        app.selected_worktree = None;
+
+        let names: Vec<String> = branches
+            .iter()
+            .map(|b| SessionManager::session_name(b))
+            .collect();
+        let busy: Vec<(String, std::time::Duration)> = names
+            .iter()
+            .map(|n| (n.clone(), std::time::Duration::ZERO))
+            .collect();
+        let quiet: Vec<(String, std::time::Duration)> =
+            names.iter().map(|n| (n.clone(), ATTENTION_QUIET)).collect();
+        app.attention.poll(&busy, None);
+        app.attention.poll(&quiet, None);
+        app
+    }
+
+    fn rendered(app: &App) -> String {
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        super::render(app, area, &mut buf);
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn statusbar_shows_attention_count_when_positive() {
+        let app = app_with_flagged(&["feat", "fix"]);
+        assert_eq!(app.attention_count(), 2);
+        let text = rendered(&app);
+        assert!(
+            text.contains('2'),
+            "expected the attention count, got {text:?}"
+        );
+        assert!(
+            text.contains("need input"),
+            "expected the aggregated attention message, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn statusbar_hides_attention_message_when_count_is_zero() {
+        let app = app_with_flagged(&[]);
+        assert_eq!(app.attention_count(), 0);
+        let text = rendered(&app);
+        assert!(
+            !text.contains("need input"),
+            "attention message must be hidden at zero, got {text:?}"
+        );
     }
 }
