@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -211,6 +211,89 @@ pub fn rename_branch(repo_path: &Path, old: &str, new: &str) -> anyhow::Result<(
     Ok(())
 }
 
+/// Outcome of a `copy_on_create` pass: how many sources were copied and how many
+/// were skipped (invalid, missing, or already present at the destination).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyReport {
+    pub copied: usize,
+    pub skipped: usize,
+}
+
+/// Security seam for `copy_on_create`: validates that `rel` is a safe relative
+/// path naming an existing FILE inside `repo_root`. Rejects (without panicking)
+/// the empty string, absolute paths, and any `..`/parent-dir component up front;
+/// then canonicalizes and requires the resolved source to stay inside the
+/// canonical `repo_root` (so a symlink escaping the repo is rejected) and to be a
+/// regular file. Returns the canonical source path on success.
+pub(crate) fn validate_rel_copy_path(repo_root: &Path, rel: &str) -> Result<PathBuf, String> {
+    if rel.is_empty() {
+        return Err("empty path".to_string());
+    }
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err(format!("absolute path rejected: {rel}"));
+    }
+    for component in rel_path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => return Err(format!("invalid path component in: {rel}")),
+        }
+    }
+
+    let canonical_root =
+        std::fs::canonicalize(repo_root).map_err(|e| format!("cannot resolve repo root: {e}"))?;
+    let canonical = std::fs::canonicalize(canonical_root.join(rel_path))
+        .map_err(|e| format!("cannot resolve {rel}: {e}"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!("path escapes repo root: {rel}"));
+    }
+    if !canonical.is_file() {
+        return Err(format!("not a file: {rel}"));
+    }
+    Ok(canonical)
+}
+
+/// Copies each validated `entry` from `repo_root` into the SAME relative location
+/// under `new_path`, creating parent dirs as needed. Never overwrites an existing
+/// destination (no-clobber) and never panics: invalid/missing sources and copy
+/// failures are counted as skips. Pure `std::fs`, no subprocess.
+pub fn copy_into_worktree(repo_root: &Path, new_path: &Path, entries: &[String]) -> CopyReport {
+    let mut report = CopyReport::default();
+    for rel in entries {
+        let Ok(src) = validate_rel_copy_path(repo_root, rel) else {
+            report.skipped += 1;
+            continue;
+        };
+        let dest = new_path.join(rel);
+        if let Some(parent) = dest.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            report.skipped += 1;
+            continue;
+        }
+        // Atomic no-clobber: create_new fails with AlreadyExists if the
+        // destination appears between validation and write, so a concurrent
+        // writer can never be clobbered.
+        let Ok(mut out) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        else {
+            report.skipped += 1;
+            continue;
+        };
+        let copied = std::fs::File::open(&src)
+            .and_then(|mut input| std::io::copy(&mut input, &mut out))
+            .is_ok();
+        if copied {
+            report.copied += 1;
+        } else {
+            report.skipped += 1;
+        }
+    }
+    report
+}
+
 pub fn remove(repo_path: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     let repo = repo_path.to_string_lossy();
     let wt = worktree_path.to_string_lossy();
@@ -355,6 +438,166 @@ bare
             got,
             argv(&["worktree", "add", "-b", "feat", "/repo/.worktrees/feat"]),
             "an empty base ref must be omitted, same as None"
+        );
+    }
+
+    // --- issue #55: copy-on-create files into new worktrees -----------------
+    //
+    // TDD RED: copy a configured allowlist of ignored/untracked files (e.g.
+    // `.env`) from the repo root into a freshly created worktree. The SECURITY
+    // SEAM is `validate_rel_copy_path(repo_root, rel) -> Result<PathBuf, String>`:
+    // it rejects absolute paths, any `..`/ParentDir component, and the empty
+    // string OUTRIGHT, then canonicalizes and asserts the source is a FILE that
+    // still resolves INSIDE `repo_root` (so a symlink escaping the repo is
+    // rejected). `copy_into_worktree(repo_root, new_path, &entries) -> CopyReport`
+    // copies only validated, existing files, NEVER clobbers an existing
+    // destination, skips missing/invalid sources without panicking, creates parent
+    // dirs for nested paths, and reports `{copied, skipped}` counts. std::fs only,
+    // no subprocess.
+
+    #[test]
+    fn validate_rel_copy_path_accepts_simple_and_nested_relative_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".env"), b"SECRET=1").unwrap();
+        std::fs::create_dir_all(root.path().join("config")).unwrap();
+        std::fs::write(root.path().join("config/local.toml"), b"k = 1").unwrap();
+
+        assert!(
+            validate_rel_copy_path(root.path(), ".env").is_ok(),
+            "a simple relative file must be accepted"
+        );
+        assert!(
+            validate_rel_copy_path(root.path(), "config/local.toml").is_ok(),
+            "a nested relative file must be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_rel_copy_path_rejects_absolute_parent_and_empty() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(
+            validate_rel_copy_path(root.path(), "/etc/passwd").is_err(),
+            "an absolute path must be rejected"
+        );
+        assert!(
+            validate_rel_copy_path(root.path(), "../secret").is_err(),
+            "a leading parent-dir escape must be rejected"
+        );
+        assert!(
+            validate_rel_copy_path(root.path(), "a/../../b").is_err(),
+            "any embedded parent-dir component must be rejected"
+        );
+        assert!(
+            validate_rel_copy_path(root.path(), "").is_err(),
+            "the empty string must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rel_copy_path_rejects_a_directory_and_a_missing_source() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("adir")).unwrap();
+
+        assert!(
+            validate_rel_copy_path(root.path(), "adir").is_err(),
+            "a directory must be rejected (files only)"
+        );
+        assert!(
+            validate_rel_copy_path(root.path(), "missing.env").is_err(),
+            "a missing source must be rejected, not panic"
+        );
+    }
+
+    #[test]
+    fn validate_rel_copy_path_rejects_a_symlink_resolving_outside_repo_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"TOP SECRET").unwrap();
+        symlink(&secret, root.path().join("link.env")).unwrap();
+
+        assert!(
+            validate_rel_copy_path(root.path(), "link.env").is_err(),
+            "a symlink that canonicalizes outside repo_root must be rejected"
+        );
+    }
+
+    #[test]
+    fn copy_into_worktree_copies_a_file_with_its_contents() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".env"), b"SECRET=1").unwrap();
+        let wt = tempfile::tempdir().unwrap();
+
+        let report = copy_into_worktree(root.path(), wt.path(), &[".env".to_string()]);
+
+        let dest = wt.path().join(".env");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"SECRET=1");
+        assert_eq!(report.copied, 1);
+        assert_eq!(report.skipped, 0);
+    }
+
+    #[test]
+    fn copy_into_worktree_creates_parent_dirs_for_a_nested_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("config")).unwrap();
+        std::fs::write(root.path().join("config/local.toml"), b"k = 1").unwrap();
+        let wt = tempfile::tempdir().unwrap();
+
+        let report = copy_into_worktree(root.path(), wt.path(), &["config/local.toml".to_string()]);
+
+        let dest = wt.path().join("config/local.toml");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"k = 1");
+        assert_eq!(report.copied, 1);
+    }
+
+    #[test]
+    fn copy_into_worktree_never_clobbers_an_existing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("app.conf"), b"NEW").unwrap();
+        let wt = tempfile::tempdir().unwrap();
+        std::fs::write(wt.path().join("app.conf"), b"OLD").unwrap();
+
+        let report = copy_into_worktree(root.path(), wt.path(), &["app.conf".to_string()]);
+
+        assert_eq!(
+            std::fs::read(wt.path().join("app.conf")).unwrap(),
+            b"OLD",
+            "an existing destination must never be overwritten"
+        );
+        assert_eq!(report.copied, 0);
+        assert_eq!(report.skipped, 1);
+    }
+
+    #[test]
+    fn copy_into_worktree_skips_missing_and_invalid_sources_without_panicking() {
+        let root = tempfile::tempdir().unwrap();
+        let wt = tempfile::tempdir().unwrap();
+
+        let report = copy_into_worktree(
+            root.path(),
+            wt.path(),
+            &[
+                "gone.env".to_string(),
+                "/etc/passwd".to_string(),
+                "../escape".to_string(),
+            ],
+        );
+
+        assert_eq!(report.copied, 0);
+        assert_eq!(
+            report.skipped, 3,
+            "every invalid/missing source must be skipped"
+        );
+        assert!(
+            !wt.path().join("gone.env").exists(),
+            "a missing source must not create a destination"
+        );
+        assert!(
+            !wt.path().join("escape").exists(),
+            "a parent-escape entry must never write anything"
         );
     }
 }

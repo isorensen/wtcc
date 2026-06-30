@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Copy-on-create files**: set `copy_on_create` (relative paths like `.env`) on a
+  repo and those files are copied from the repo root into each new worktree on
+  creation. Paths are validated against traversal (no absolute/`..`/symlink escape),
+  existing files are never clobbered (atomic create), and missing sources are
+  skipped (#55).
 - **Per-repo base ref** for new worktrees: set `base_ref` on a repo in the config
   and new-branch worktrees start from that ref (`git worktree add -b <branch>
   <path> <base_ref>`) instead of `HEAD`. Unset → unchanged behavior (#54).
