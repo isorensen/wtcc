@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-30
+
 ### Added
 - **Roadmap** section in the README documenting the v0.6.0–v0.8.0 release plan
   (feature parity with Supacode, organized by milestone).
@@ -112,7 +114,8 @@ All notable changes to this project are documented here. The format is based on
   persistence (sessions survive app exit and reattach).
 - Project-local `/issue` skill (GitHub variant) for issue/milestone/PR workflow.
 
-[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/isorensen/wtcc/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/isorensen/wtcc/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/isorensen/wtcc/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/isorensen/wtcc/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/isorensen/wtcc/compare/v0.2.0...v0.3.0
