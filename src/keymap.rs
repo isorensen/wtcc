@@ -35,13 +35,17 @@ pub enum Action {
     ClosePr,
     ToggleArchive,
     ShowArchived,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PrevTab,
     Quit,
 }
 
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 27] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -64,6 +68,10 @@ impl Action {
         Action::ClosePr,
         Action::ToggleArchive,
         Action::ShowArchived,
+        Action::NewTab,
+        Action::CloseTab,
+        Action::NextTab,
+        Action::PrevTab,
         Action::Quit,
     ];
 
@@ -94,6 +102,10 @@ impl Action {
             Action::ClosePr => "Close PR",
             Action::ToggleArchive => "Archive/unarchive worktree",
             Action::ShowArchived => "Show/hide archived worktrees",
+            Action::NewTab => "New tab",
+            Action::CloseTab => "Close tab",
+            Action::NextTab => "Next tab",
+            Action::PrevTab => "Previous tab",
             Action::Quit => "Quit",
         }
     }
@@ -119,6 +131,10 @@ impl Action {
                 | Action::ClosePr
                 | Action::ToggleArchive
                 | Action::ShowArchived
+                | Action::NewTab
+                | Action::CloseTab
+                | Action::NextTab
+                | Action::PrevTab
                 | Action::Quit
         )
     }
@@ -254,6 +270,24 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('q')), Chord::ctrl('q')],
         action: Action::Quit,
+    },
+    // Tab management (issue #48). Sidebar-focus only: in agent focus every
+    // printable key forwards to the PTY, so these live here and in the palette.
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('t'))],
+        action: Action::NewTab,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('w'))],
+        action: Action::CloseTab,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char(']'))],
+        action: Action::NextTab,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('['))],
+        action: Action::PrevTab,
     },
 ];
 

@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Per-worktree tabs**: a worktree can now host multiple terminal surfaces — the
+  agent (tab 0) plus extra **shell tabs**. `t` opens a new shell tab, `w` closes the
+  active shell tab (the agent tab is protected), `]` / `[` cycle tabs. A tab strip
+  shows the titles with the active one highlighted, and each worktree remembers its
+  own tabs. Closing a tab or removing a worktree kills the tab's `tmux` session, so
+  nothing leaks. (Tabs are in-memory; shell tabs don't survive a wtcc restart — the
+  agent tab does, as before.) (#48)
+
 ## [0.7.0] - 2026-06-30
 
 ### Added

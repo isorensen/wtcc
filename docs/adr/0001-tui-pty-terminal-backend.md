@@ -46,6 +46,16 @@ issue #12.
 > `tui-term 0.3` / `vt100 0.16`. The `unicode-width` conflict is resolved, the `lru` advisory is
 > cleared, and the Dependabot ignore block has been removed. The pin above is now historical.
 
+> **Update (#48 — per-worktree tabs):** the PTY/tmux backend now hosts **multiple named surfaces
+> per worktree**, not just one. Each worktree owns an ordered list of *tabs*: tab 0 is the agent
+> (`wtcc-<slug>`, unchanged reattach behavior) and additional tabs are shell surfaces
+> (`wtcc-<slug>-t<n>`, each a `tmux new-session -A` running the default shell). The same
+> `vt100` + `tui-term` rendering path draws whichever surface is active, below a one-row tab strip.
+> Split panes were explicitly cut from scope. KNOWN GAP: the tab *list* is in-memory only and not
+> persisted, so shell tabs are lost on wtcc restart (the agent tab still persists via its named tmux
+> session). Closing a shell tab kills its session, and worktree removal sweeps every `wtcc-<slug>*`
+> surface, so no shell session is orphaned.
+
 ## Consequences
 
 **Positive**
