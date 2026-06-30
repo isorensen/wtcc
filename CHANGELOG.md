@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Roadmap** section in the README documenting the v0.6.0–v0.8.0 release plan
+  (feature parity with Supacode, organized by milestone).
+
 ## [0.5.0] - 2026-06-22
 
 ### Added

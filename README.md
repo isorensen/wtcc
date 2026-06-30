@@ -48,6 +48,50 @@ result is lighter, runs in any terminal, and needs no GTK/Wayland-specific stack
 - See **git + PR/CI status per worktree** via the `gh` CLI.
 - Fuzzy **command palette** and vim-friendly keybinds.
 
+## Roadmap
+
+`wtcc` is an early-stage, open-source reimagining of the macOS app
+[Supacode](https://github.com/supabitapp/supacode) for the Linux terminal. The releases below
+track the path toward feature parity, plus a few terminal-native ideas of our own. Work is
+organized into milestones on the [issue tracker](https://github.com/isorensen/wtcc/milestones);
+each line links to an issue once filed. Scope follows a strict *start-minimal, expand-on-real-pain*
+rule — speculative features (split panes, in-PTY mouse scroll) are deliberately deferred until
+there is real demand.
+
+**Shipped (v0.5.0):** repository registration · git worktrees (create / switch / remove) · a
+persistent Claude Code agent per worktree (tmux-backed, survives restarts) · live agent terminal ·
+git + PR/CI status badges via `gh` · fuzzy command palette · vim keybinds · basic mouse
+(click-to-select).
+
+### v0.6.0 — Usability
+
+Everyday feel, plus the headline multi-agent gap.
+
+| Feature | Notes |
+|---|---|
+| Data-driven keymap | One source of truth for dispatch, the help overlay, statusbar hints and the palette |
+| Theme & visual hierarchy | Centralized colors, a focused-pane border, clearer sidebar/statusbar |
+| Wheel-scroll the sidebar | Mouse wheel moves the selection |
+| Fix orphaned agent sessions | Removing a worktree now kills its `tmux` session instead of leaking it |
+| **Agent attention routing** | Detect when an agent goes quiet (finished / waiting for input), mark it in the sidebar, count unread, add a jump key, and optionally fire a `notify-send` desktop notification |
+
+### v0.7.0 — Worktree & agent ops
+
+| Feature | Notes |
+|---|---|
+| Repo lifecycle scripts | `setup`-on-create and `archive`-before-remove hooks |
+| GitHub PR write actions | Merge · mark ready · close · open in browser, via `gh` |
+| Branch rename | Renames the branch and re-keys the agent's `tmux` session |
+| Per-worktree agent presets | Pick Claude Code / Codex / opencode per worktree |
+| Archive worktrees | Soft-hide from the sidebar instead of deleting |
+| Per-repo base ref | Branch new worktrees from a configured ref |
+| Copy-on-create files | Copy `.env`-style files into a new worktree on creation |
+
+### v0.8.0 — Multi-surface terminal
+
+Per-worktree **tabs** — multiple agent/shell surfaces in one worktree — and a run-dev-on-key
+command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into the agent PTY.
+
 ## Keybindings
 
 **Sidebar focus**
