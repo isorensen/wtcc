@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Repository {
     pub name: String,
     pub path: PathBuf,
@@ -14,6 +14,11 @@ pub struct Repository {
     /// Absent in legacy configs and omitted from output when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<String>,
+    /// Worktree paths soft-hidden from the sidebar. A pure UI/config marker: the
+    /// worktree and its branch stay on disk. Absent in legacy configs and omitted
+    /// from output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<PathBuf>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -45,6 +50,7 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         path,
         setup: None,
         archive: None,
+        archived: Vec::new(),
     })
 }
 

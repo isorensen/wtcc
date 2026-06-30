@@ -29,6 +29,8 @@ pub fn sidebar_rows(
     repos: &[Repository],
     worktrees: &[Worktree],
     selected_repo: Option<usize>,
+    archived: &[std::path::PathBuf],
+    show_archived: bool,
 ) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
     for ri in 0..repos.len() {
@@ -37,7 +39,11 @@ pub fn sidebar_rows(
             if worktrees.is_empty() {
                 rows.push(SidebarRow::NoWorktrees);
             }
-            for wi in 0..worktrees.len() {
+            for (wi, wt) in worktrees.iter().enumerate() {
+                let is_archived = archived.iter().any(|p| p == &wt.path);
+                if is_archived && !show_archived {
+                    continue;
+                }
                 rows.push(SidebarRow::Worktree(wi));
             }
         }
@@ -46,6 +52,16 @@ pub fn sidebar_rows(
         rows.push(SidebarRow::EmptyHint);
     }
     rows
+}
+
+/// The selected repo's `archived` markers, or an empty slice when no repo is
+/// selected. The single lookup both the renderer and the hit-test use to learn
+/// which worktrees are soft-hidden.
+pub(crate) fn selected_archived(app: &App) -> &[std::path::PathBuf] {
+    app.selected_repo
+        .and_then(|i| app.config.repos.get(i))
+        .map(|r| r.archived.as_slice())
+        .unwrap_or(&[])
 }
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
@@ -57,7 +73,14 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         .borders(Borders::ALL)
         .border_style(super::pane_border_style(&theme, focused));
 
-    let rows = sidebar_rows(&app.config.repos, &app.worktrees, app.selected_repo);
+    let archived = selected_archived(app);
+    let rows = sidebar_rows(
+        &app.config.repos,
+        &app.worktrees,
+        app.selected_repo,
+        archived,
+        app.show_archived,
+    );
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match *row {
@@ -75,7 +98,14 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
             }
             SidebarRow::NoWorktrees => ListItem::new(Line::from("    (no worktrees)")),
             SidebarRow::Worktree(wi) => {
-                ListItem::new(worktree_line(app, focused, wi, &app.worktrees[wi]))
+                let is_archived = archived.iter().any(|p| p == &app.worktrees[wi].path);
+                ListItem::new(worktree_line(
+                    app,
+                    focused,
+                    wi,
+                    is_archived,
+                    &app.worktrees[wi],
+                ))
             }
             SidebarRow::EmptyHint => ListItem::new(Line::from("  press a to register a repo")),
         })
@@ -88,6 +118,7 @@ fn worktree_line<'a>(
     app: &App,
     focused: bool,
     index: usize,
+    is_archived: bool,
     wt: &'a crate::worktree::Worktree,
 ) -> Line<'a> {
     let selected = app.selected_worktree == Some(index);
@@ -108,6 +139,11 @@ fn worktree_line<'a>(
         if focused {
             style = style.add_modifier(Modifier::REVERSED);
         }
+    }
+    // Archived rows only reach here when `show_archived` is on; dim them so they
+    // read as soft-hidden without leaving the list.
+    if is_archived {
+        style = style.add_modifier(Modifier::DIM);
     }
 
     let mut spans = vec![
@@ -239,6 +275,67 @@ mod tests {
         );
     }
 
+    /// With archived rows shown, an archived worktree's label must render dimmed
+    /// (DIM modifier) while a non-archived one must not — the AC's "visually
+    /// distinct" requirement.
+    #[test]
+    fn render_dims_archived_rows_when_shown() {
+        // Repo name "z" so the letters 'm'/'f' only appear in the branch labels.
+        let mut app = App::new(Config {
+            repos: vec![Repository {
+                name: "z".to_string(),
+                path: PathBuf::from("/tmp/wtcc-sidebar-dim-none"),
+                setup: None,
+                archive: None,
+                archived: vec![PathBuf::from("/r/feat")],
+            }],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
+        });
+        app.selected_repo = Some(0);
+        app.show_archived = true;
+        app.focus = Focus::Agent; // avoid selection REVERSED styling on the label
+        app.selected_worktree = None;
+        app.worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/r/main"),
+                branch: "main".to_string(),
+                head: "abc".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+            Worktree {
+                path: PathBuf::from("/r/feat"),
+                branch: "feat".to_string(),
+                head: "def".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+        ];
+
+        let area = Rect::new(0, 0, 34, 8);
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+
+        let modifier = |symbol: &str| {
+            buf.content()
+                .iter()
+                .find(|c| c.symbol() == symbol)
+                .map(|c| c.modifier)
+                .unwrap_or_else(|| panic!("expected a {symbol:?} cell"))
+        };
+        assert!(
+            modifier("f").contains(Modifier::DIM),
+            "the archived row's label must render dimmed"
+        );
+        assert!(
+            !modifier("m").contains(Modifier::DIM),
+            "a non-archived row's label must not be dimmed"
+        );
+    }
+
     #[test]
     fn render_shows_attention_marker_for_a_flagged_worktree() {
         let mut app = App::new(Config {
@@ -247,6 +344,7 @@ mod tests {
                 path: PathBuf::from("/tmp/wtcc-sidebar-attn-none"),
                 setup: None,
                 archive: None,
+                archived: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,

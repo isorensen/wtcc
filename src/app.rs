@@ -137,6 +137,9 @@ pub struct App {
     pub worktrees: Vec<Worktree>,
     pub selected_worktree: Option<usize>,
     pub focus: Focus,
+    /// In-memory UI toggle: when `true`, archived worktrees are shown in the
+    /// sidebar. Defaults to `false`; not persisted (the `archived` markers are).
+    pub show_archived: bool,
     /// UI colors, resolved once at startup. Default-only; no user config.
     pub theme: Theme,
     pub overlay: Overlay,
@@ -206,6 +209,7 @@ impl App {
             worktrees: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
@@ -328,32 +332,67 @@ impl App {
         }
     }
 
-    fn next_worktree(&mut self) {
-        if self.worktrees.is_empty() {
-            return;
+    /// Worktree indices that keyboard navigation may land on, in display order.
+    /// When `show_archived` is true every worktree is navigable; otherwise the
+    /// selected repo's archived (soft-hidden) worktrees are skipped, using the
+    /// same `archived` set the sidebar filters on. Hidden rows are treated as
+    /// non-existent for selection.
+    fn navigable_worktrees(&self) -> Vec<usize> {
+        if self.show_archived {
+            return (0..self.worktrees.len()).collect();
         }
-        let i = self.selected_worktree.map_or(0, |i| {
-            if i + 1 >= self.worktrees.len() {
-                0
-            } else {
-                i + 1
-            }
-        });
-        self.selected_worktree = Some(i);
+        let archived = crate::ui::sidebar::selected_archived(self);
+        (0..self.worktrees.len())
+            .filter(|&i| !archived.iter().any(|p| p == &self.worktrees[i].path))
+            .collect()
+    }
+
+    fn next_worktree(&mut self) {
+        let nav = self.navigable_worktrees();
+        let Some(&first) = nav.first() else {
+            return;
+        };
+        let next = self
+            .selected_worktree
+            .and_then(|cur| nav.iter().position(|&i| i == cur))
+            .map_or(first, |pos| nav[(pos + 1) % nav.len()]);
+        self.selected_worktree = Some(next);
     }
 
     fn prev_worktree(&mut self) {
-        if self.worktrees.is_empty() {
+        let nav = self.navigable_worktrees();
+        let Some(&first) = nav.first() else {
+            return;
+        };
+        let prev = self
+            .selected_worktree
+            .and_then(|cur| nav.iter().position(|&i| i == cur))
+            .map_or(first, |pos| nav[(pos + nav.len() - 1) % nav.len()]);
+        self.selected_worktree = Some(prev);
+    }
+
+    /// If the current selection points at a worktree that is no longer
+    /// navigable (e.g. it was just archived while archived rows are hidden),
+    /// moves selection to the nearest still-visible row — the first visible row
+    /// after it, else the last visible one before it. A no-op when the selection
+    /// is already visible, and when nothing is visible the selection is kept so
+    /// the row stays reversible (e.g. unarchiving the only worktree via toggle).
+    pub fn select_nearest_visible(&mut self) {
+        let nav = self.navigable_worktrees();
+        let Some(cur) = self.selected_worktree else {
+            return;
+        };
+        if nav.contains(&cur) {
             return;
         }
-        let i = self.selected_worktree.map_or(0, |i| {
-            if i == 0 {
-                self.worktrees.len() - 1
-            } else {
-                i - 1
-            }
-        });
-        self.selected_worktree = Some(i);
+        if let Some(target) = nav
+            .iter()
+            .copied()
+            .find(|&i| i > cur)
+            .or_else(|| nav.iter().copied().rev().find(|&i| i < cur))
+        {
+            self.selected_worktree = Some(target);
+        }
     }
 
     /// Lazily spawns (or reuses) the agent session for the current worktree and
@@ -649,6 +688,67 @@ impl App {
         }
     }
 
+    /// Soft-hides `path` from the sidebar by adding it to the selected repo's
+    /// `archived` markers and persisting the config. Pure UI/config: the worktree
+    /// and its branch stay on disk (no git op). A no-op if already archived; a
+    /// persist failure rolls the marker back out and reports it. Never panics.
+    pub fn archive_worktree(&mut self, path: &Path) {
+        let Some(repo_idx) = self.selected_repo else {
+            self.status = Some("no repo selected".to_string());
+            return;
+        };
+        {
+            let Some(repo) = self.config.repos.get_mut(repo_idx) else {
+                return;
+            };
+            if repo.archived.iter().any(|p| p == path) {
+                return;
+            }
+            repo.archived.push(path.to_path_buf());
+        }
+        if let Err(e) = self.persist_config() {
+            if let Some(repo) = self.config.repos.get_mut(repo_idx) {
+                repo.archived.retain(|p| p != path);
+            }
+            self.status = Some(format!("save failed: {e}"));
+        }
+    }
+
+    /// Un-hides `path` by removing it from the selected repo's `archived` markers
+    /// and persisting the config. A no-op if not archived; a persist failure
+    /// re-adds the marker and reports it. Never panics.
+    pub fn unarchive_worktree(&mut self, path: &Path) {
+        let Some(repo_idx) = self.selected_repo else {
+            self.status = Some("no repo selected".to_string());
+            return;
+        };
+        {
+            let Some(repo) = self.config.repos.get_mut(repo_idx) else {
+                return;
+            };
+            let before = repo.archived.len();
+            repo.archived.retain(|p| p != path);
+            if repo.archived.len() == before {
+                return;
+            }
+        }
+        if let Err(e) = self.persist_config() {
+            if let Some(repo) = self.config.repos.get_mut(repo_idx) {
+                repo.archived.push(path.to_path_buf());
+            }
+            self.status = Some(format!("save failed: {e}"));
+        }
+    }
+
+    /// Persists the config to the redirected `config_path` (tests) or the default
+    /// XDG path (production).
+    fn persist_config(&self) -> anyhow::Result<()> {
+        match &self.config_path {
+            Some(path) => self.config.save_to(path),
+            None => self.config.save(),
+        }
+    }
+
     /// Restarts the agent for `branch`: kills its `wtcc-<slug>` tmux session and
     /// drops the local `Session`, then clears `active_session` if it pointed at
     /// that session so the run loop's `ensure_active_session` respawns a fresh
@@ -851,6 +951,7 @@ mod tests {
                 path: PathBuf::from("/tmp/does-not-exist-demo"),
                 setup: None,
                 archive: None,
+                archived: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -882,6 +983,7 @@ mod tests {
             ],
             selected_worktree: Some(0),
             focus: Focus::Sidebar,
+            show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
@@ -1006,6 +1108,70 @@ mod tests {
         assert_eq!(app.selected_worktree, Some(1));
     }
 
+    /// Builds the 2-worktree fake app, appends a third (`bug`) and archives the
+    /// middle one (`feat`), selection on `main`. Mirrors the sidebar's hidden
+    /// state: navigable rows are 0 and 2.
+    fn app_with_archived_middle() -> App {
+        let mut app = app_with_fake_worktrees();
+        app.worktrees.push(Worktree {
+            path: PathBuf::from("/repo/bug"),
+            branch: "bug".to_string(),
+            head: "ghi789".to_string(),
+            is_bare: false,
+            is_detached: false,
+        });
+        app.config.repos[0].archived = vec![PathBuf::from("/repo/feat")];
+        app.selected_worktree = Some(0);
+        app
+    }
+
+    #[test]
+    fn nav_skips_hidden_archived_worktree() {
+        let mut app = app_with_archived_middle();
+        assert!(!app.show_archived);
+        assert_eq!(app.selected_worktree, Some(0));
+
+        // Forward never lands on the hidden index 1: 0 -> 2 -> wrap to 0.
+        app.next();
+        assert_eq!(app.selected_worktree, Some(2));
+        app.next();
+        assert_eq!(app.selected_worktree, Some(0));
+
+        // Backward likewise skips 1: 0 -> 2 -> 0.
+        app.prev();
+        assert_eq!(app.selected_worktree, Some(2));
+        app.prev();
+        assert_eq!(app.selected_worktree, Some(0));
+    }
+
+    #[test]
+    fn nav_visits_every_worktree_when_archived_shown() {
+        let mut app = app_with_archived_middle();
+        app.show_archived = true;
+
+        app.next();
+        assert_eq!(app.selected_worktree, Some(1));
+        app.next();
+        assert_eq!(app.selected_worktree, Some(2));
+        app.next();
+        assert_eq!(app.selected_worktree, Some(0));
+    }
+
+    #[test]
+    fn select_nearest_visible_moves_off_a_hidden_selection() {
+        let mut app = app_with_archived_middle();
+        // Pretend selection is stranded on the hidden middle row.
+        app.selected_worktree = Some(1);
+
+        app.select_nearest_visible();
+
+        assert_eq!(
+            app.selected_worktree,
+            Some(2),
+            "a hidden selection must move to the nearest visible neighbor"
+        );
+    }
+
     #[test]
     fn toggle_focus_round_trips() {
         let mut app = app_with_fake_worktrees();
@@ -1037,12 +1203,14 @@ mod tests {
                         path: repo_a,
                         setup: None,
                         archive: None,
+                        archived: Vec::new(),
                     },
                     Repository {
                         name: "repo-b".to_string(),
                         path: repo_b,
                         setup: None,
                         archive: None,
+                        archived: Vec::new(),
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -1054,6 +1222,7 @@ mod tests {
             worktrees: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
@@ -1340,6 +1509,7 @@ mod tests {
                     path: repo,
                     setup: None,
                     archive: None,
+                    archived: Vec::new(),
                 }],
                 agent_cmd: "claude".to_string(),
                 notify: true,
@@ -1350,6 +1520,7 @@ mod tests {
             worktrees: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
             status: None,

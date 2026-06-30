@@ -53,6 +53,7 @@ fn base_app() -> App {
         path: PathBuf::from("/tmp/wtcc-issue50-does-not-exist"),
         setup: None,
         archive: None,
+        archived: Vec::new(),
     }];
     let mut app = App::new(cfg);
     app.worktrees = vec![Worktree {

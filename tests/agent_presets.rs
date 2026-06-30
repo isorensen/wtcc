@@ -49,6 +49,7 @@ fn app_with_presets() -> App {
             path: PathBuf::from("/tmp/wtcc-issue52-does-not-exist"),
             setup: None,
             archive: None,
+            archived: Vec::new(),
         }],
         agents: vec![
             preset("claude", "claude"),

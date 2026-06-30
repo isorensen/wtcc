@@ -66,6 +66,7 @@ pub enum Hit {
 /// status line; the sidebar is a bordered block on the left and the agent pane
 /// fills the rest. Sidebar rows are resolved through [`sidebar::sidebar_rows`]
 /// so this can never drift from what the sidebar draws. No I/O, no panics.
+#[allow(clippy::too_many_arguments)]
 pub fn hit_test(
     col: u16,
     row: u16,
@@ -73,6 +74,8 @@ pub fn hit_test(
     repos: &[Repository],
     worktrees: &[Worktree],
     selected_repo: Option<usize>,
+    archived: &[std::path::PathBuf],
+    show_archived: bool,
 ) -> Hit {
     let body_height = area.height.saturating_sub(STATUS_HEIGHT);
     // Below the body (status line, or off-screen) is inert.
@@ -90,7 +93,9 @@ pub fn hit_test(
         return Hit::None;
     }
     let list_index = (row - 1) as usize;
-    match sidebar::sidebar_rows(repos, worktrees, selected_repo).get(list_index) {
+    match sidebar::sidebar_rows(repos, worktrees, selected_repo, archived, show_archived)
+        .get(list_index)
+    {
         Some(SidebarRow::RepoHeader(ri)) => Hit::Repo(*ri),
         Some(SidebarRow::Worktree(wi)) => Hit::Worktree(*wi),
         _ => Hit::None,
@@ -112,6 +117,8 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
         &app.config.repos,
         &app.worktrees,
         app.selected_repo,
+        sidebar::selected_archived(app),
+        app.show_archived,
     ) {
         Hit::None => {}
         Hit::Agent => app.focus = Focus::Agent,
@@ -357,6 +364,24 @@ fn request_close_pr(app: &mut App) {
     }
 }
 
+/// Toggles the selected worktree's archived (soft-hidden) state: archives it if
+/// currently visible, unarchives it if already archived. No-op with a status note
+/// when no worktree is selected.
+fn toggle_archive(app: &mut App) {
+    let Some(path) = app.current_worktree().map(|w| w.path.clone()) else {
+        app.status = Some("no worktree selected".to_string());
+        return;
+    };
+    if sidebar::selected_archived(app).iter().any(|p| p == &path) {
+        app.unarchive_worktree(&path);
+    } else {
+        app.archive_worktree(&path);
+    }
+    // Archiving the selected worktree while archived rows are hidden would
+    // strand selection on an invisible row; move it to a visible neighbor.
+    app.select_nearest_visible();
+}
+
 /// Executes a resolved [`Action`], whether it came from a key dispatch or the
 /// command palette. The single place that maps semantic actions to app effects.
 fn run_action(app: &mut App, action: Action) {
@@ -381,6 +406,8 @@ fn run_action(app: &mut App, action: Action) {
         Action::MarkReady => app.pr_mark_ready(),
         Action::MergePr => request_merge_pr(app),
         Action::ClosePr => request_close_pr(app),
+        Action::ToggleArchive => toggle_archive(app),
+        Action::ShowArchived => app.show_archived = !app.show_archived,
         Action::Quit => app.should_quit = true,
     }
 }
@@ -405,6 +432,7 @@ mod tests {
                 path: PathBuf::from("/tmp/nope"),
                 setup: None,
                 archive: None,
+                archived: Vec::new(),
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -660,6 +688,7 @@ mod tests {
                 path: PathBuf::from(format!("/tmp/repo{i}")),
                 setup: None,
                 archive: None,
+                archived: Vec::new(),
             })
             .collect()
     }
@@ -687,7 +716,7 @@ mod tests {
 
     #[test]
     fn hit_repo_header_row() {
-        let hit = hit_test(2, 1, area(), &repos(2), &worktrees(2), Some(0));
+        let hit = hit_test(2, 1, area(), &repos(2), &worktrees(2), Some(0), &[], false);
         assert_eq!(hit, Hit::Repo(0));
     }
 
@@ -695,34 +724,49 @@ mod tests {
     fn hit_worktree_rows_under_selected_repo() {
         let r = repos(2);
         let w = worktrees(2);
-        assert_eq!(hit_test(3, 2, area(), &r, &w, Some(0)), Hit::Worktree(0));
-        assert_eq!(hit_test(3, 3, area(), &r, &w, Some(0)), Hit::Worktree(1));
+        assert_eq!(
+            hit_test(3, 2, area(), &r, &w, Some(0), &[], false),
+            Hit::Worktree(0)
+        );
+        assert_eq!(
+            hit_test(3, 3, area(), &r, &w, Some(0), &[], false),
+            Hit::Worktree(1)
+        );
     }
 
     #[test]
     fn second_repo_header_falls_after_first_repos_worktrees() {
         // rows: 1=Repo(0), 2=Worktree(0), 3=Worktree(1), 4=Repo(1)
-        let hit = hit_test(2, 4, area(), &repos(2), &worktrees(2), Some(0));
+        let hit = hit_test(2, 4, area(), &repos(2), &worktrees(2), Some(0), &[], false);
         assert_eq!(hit, Hit::Repo(1));
     }
 
     #[test]
     fn hit_agent_region() {
-        let hit = hit_test(SIDEBAR_WIDTH, 5, area(), &repos(1), &worktrees(1), Some(0));
+        let hit = hit_test(
+            SIDEBAR_WIDTH,
+            5,
+            area(),
+            &repos(1),
+            &worktrees(1),
+            Some(0),
+            &[],
+            false,
+        );
         assert_eq!(hit, Hit::Agent);
     }
 
     #[test]
     fn hit_status_line_is_none() {
         // Last body row is height-1-STATUS_HEIGHT; the status line itself is row 23.
-        let hit = hit_test(2, 23, area(), &repos(1), &worktrees(1), Some(0));
+        let hit = hit_test(2, 23, area(), &repos(1), &worktrees(1), Some(0), &[], false);
         assert_eq!(hit, Hit::None);
     }
 
     #[test]
     fn hit_blank_sidebar_space_is_none() {
         // Below the last list row (only Repo(0)+2 worktrees occupy rows 1..=3).
-        let hit = hit_test(2, 10, area(), &repos(1), &worktrees(2), Some(0));
+        let hit = hit_test(2, 10, area(), &repos(1), &worktrees(2), Some(0), &[], false);
         assert_eq!(hit, Hit::None);
     }
 
@@ -730,13 +774,28 @@ mod tests {
     fn hit_top_and_left_border_is_none() {
         let r = repos(1);
         let w = worktrees(1);
-        assert_eq!(hit_test(2, 0, area(), &r, &w, Some(0)), Hit::None); // top border
-        assert_eq!(hit_test(0, 1, area(), &r, &w, Some(0)), Hit::None); // left border
+        assert_eq!(
+            hit_test(2, 0, area(), &r, &w, Some(0), &[], false),
+            Hit::None
+        ); // top border
+        assert_eq!(
+            hit_test(0, 1, area(), &r, &w, Some(0), &[], false),
+            Hit::None
+        ); // left border
     }
 
     #[test]
     fn hit_does_not_panic_on_out_of_range() {
-        let hit = hit_test(1000, 1000, area(), &repos(1), &worktrees(1), Some(0));
+        let hit = hit_test(
+            1000,
+            1000,
+            area(),
+            &repos(1),
+            &worktrees(1),
+            Some(0),
+            &[],
+            false,
+        );
         assert_eq!(hit, Hit::None);
     }
 

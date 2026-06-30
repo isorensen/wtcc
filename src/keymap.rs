@@ -33,13 +33,15 @@ pub enum Action {
     MarkReady,
     MergePr,
     ClosePr,
+    ToggleArchive,
+    ShowArchived,
     Quit,
 }
 
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 21] = [
+    pub const ALL: [Action; 23] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -60,6 +62,8 @@ impl Action {
         Action::MarkReady,
         Action::MergePr,
         Action::ClosePr,
+        Action::ToggleArchive,
+        Action::ShowArchived,
         Action::Quit,
     ];
 
@@ -88,6 +92,8 @@ impl Action {
             Action::MarkReady => "Mark PR ready",
             Action::MergePr => "Merge PR",
             Action::ClosePr => "Close PR",
+            Action::ToggleArchive => "Archive/unarchive worktree",
+            Action::ShowArchived => "Show/hide archived worktrees",
             Action::Quit => "Quit",
         }
     }
@@ -111,6 +117,8 @@ impl Action {
                 | Action::MarkReady
                 | Action::MergePr
                 | Action::ClosePr
+                | Action::ToggleArchive
+                | Action::ShowArchived
                 | Action::Quit
         )
     }
@@ -226,6 +234,14 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('m'))],
         action: Action::MergePr,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('x'))],
+        action: Action::ToggleArchive,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('X'))],
+        action: Action::ShowArchived,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char(':')), Chord::ctrl('p')],
