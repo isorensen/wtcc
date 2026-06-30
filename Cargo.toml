@@ -1,6 +1,6 @@
 [package]
 name = "wtcc"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "WorkTree Command Center — a TUI for running Claude Code agents across git worktrees"
 license = "MIT"
