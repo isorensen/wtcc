@@ -1,65 +1,40 @@
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    AddRepo,
-    RemoveRepo,
-    AddWorktree,
-    RemoveWorktree,
-    RestartAgent,
-    SwitchRepo,
-    Refresh,
-    Quit,
+use crate::keymap::Action;
+
+/// The palette command list, derived from the keymap: every action the keymap
+/// declares as palette-visible, in [`Action::ALL`] order.
+fn palette_actions() -> Vec<Action> {
+    Action::ALL
+        .iter()
+        .copied()
+        .filter(|a| a.in_palette())
+        .collect()
 }
 
-impl Command {
-    pub const ALL: [Command; 8] = [
-        Command::AddRepo,
-        Command::RemoveRepo,
-        Command::AddWorktree,
-        Command::RemoveWorktree,
-        Command::RestartAgent,
-        Command::SwitchRepo,
-        Command::Refresh,
-        Command::Quit,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Command::AddRepo => "Add repository",
-            Command::RemoveRepo => "Remove repository",
-            Command::AddWorktree => "Add worktree",
-            Command::RemoveWorktree => "Remove worktree",
-            Command::RestartAgent => "Restart agent",
-            Command::SwitchRepo => "Switch repo",
-            Command::Refresh => "Refresh",
-            Command::Quit => "Quit",
-        }
-    }
-}
-
-/// Ranks the commands against a fuzzy `query`. An empty query returns every
-/// command in declaration order.
-pub fn filter(query: &str) -> Vec<Command> {
+/// Ranks the palette actions against a fuzzy `query`. An empty query returns
+/// every palette action in declaration order.
+pub fn filter(query: &str) -> Vec<Action> {
+    let actions = palette_actions();
     if query.is_empty() {
-        return Command::ALL.to_vec();
+        return actions;
     }
 
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
-    let mut scored: Vec<(u32, Command)> = Command::ALL
+    let mut scored: Vec<(u32, Action)> = actions
         .iter()
-        .filter_map(|&cmd| {
+        .filter_map(|&action| {
             let mut buf = Vec::new();
-            let haystack = nucleo_matcher::Utf32Str::new(cmd.label(), &mut buf);
-            pattern.score(haystack, &mut matcher).map(|s| (s, cmd))
+            let haystack = nucleo_matcher::Utf32Str::new(action.label(), &mut buf);
+            pattern.score(haystack, &mut matcher).map(|s| (s, action))
         })
         .collect();
 
     scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(_, cmd)| cmd).collect()
+    scored.into_iter().map(|(_, action)| action).collect()
 }
 
 #[cfg(test)]
@@ -67,24 +42,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_query_returns_all_in_order() {
-        assert_eq!(filter(""), Command::ALL.to_vec());
+    fn empty_query_returns_all_palette_actions_in_order() {
+        assert_eq!(filter(""), palette_actions());
     }
 
     #[test]
     fn fuzzy_query_ranks_best_match_first() {
-        let result = filter("worktree");
-        assert_eq!(result.first(), Some(&Command::AddWorktree));
+        assert_eq!(filter("worktree").first(), Some(&Action::AddWorktree));
     }
 
     #[test]
     fn fuzzy_query_matches_add_repo() {
-        let result = filter("repo");
-        assert_eq!(result.first(), Some(&Command::AddRepo));
+        assert_eq!(filter("repo").first(), Some(&Action::AddRepo));
     }
 
     #[test]
     fn nonsense_query_filters_everything_out() {
         assert!(filter("zzzzqqqq").is_empty());
+    }
+
+    #[test]
+    fn palette_excludes_nav_and_modal_actions() {
+        let actions = palette_actions();
+        assert!(!actions.contains(&Action::Next));
+        assert!(!actions.contains(&Action::OpenPalette));
+        assert!(!actions.contains(&Action::Help));
     }
 }

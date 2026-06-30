@@ -184,22 +184,33 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
 }
 
 fn render_help(area: Rect, buf: &mut Buffer) {
+    use crate::keymap::{self, AGENT, PRIMARY};
+
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let key_style = Style::default().fg(ratatui::style::Color::Cyan);
 
-    let mut lines: Vec<Line> = Vec::new();
-    let mut push_group = |heading: &str, bindings: &[(&str, &str)]| {
-        lines.push(Line::styled(heading.to_string(), bold));
-        for (keys, action) in bindings {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {keys:<12}"), key_style),
-                Span::raw(action.to_string()),
-            ]));
-        }
-        lines.push(Line::raw(""));
+    let row = |keys: &str, label: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {keys:<12}"), key_style),
+            Span::raw(label.to_string()),
+        ])
     };
-    push_group("Sidebar", crate::event::HELP_SIDEBAR);
-    push_group("Agent", crate::event::HELP_AGENT);
+
+    // Derived entirely from the keymap table so help can never drift from the
+    // live bindings; the agent forwarding notes are context, not bindings.
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled("Sidebar".to_string(), bold));
+    for (keys, label) in keymap::help_rows(PRIMARY) {
+        lines.push(row(&keys, label));
+    }
+    lines.push(Line::raw(""));
+
+    lines.push(Line::styled("Agent".to_string(), bold));
+    lines.push(row("(keys)", "forwarded to the agent"));
+    for (keys, label) in keymap::help_rows(AGENT) {
+        lines.push(row(&keys, label));
+    }
+    lines.push(row("Ctrl-C", "forwarded to the agent"));
 
     // Size the box to its content (+2 for the border) so no section is clipped
     // on short terminals, clamped to the available area.
@@ -352,6 +363,31 @@ mod tests {
         assert!(text.contains("Sidebar"), "expected Sidebar heading");
         assert!(text.contains("command palette"), "expected a help binding");
         assert!(text.contains("quit"), "expected a quit binding");
+    }
+
+    #[test]
+    fn help_overlay_is_derived_from_keymap_table() {
+        use crate::keymap::{self, AGENT, PRIMARY};
+
+        let mut app = app_for_render();
+        app.overlay = Overlay::Help;
+
+        // Render into a buffer large enough that the help box never clips.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+
+        let mut rows = keymap::help_rows(PRIMARY);
+        rows.extend(keymap::help_rows(AGENT));
+        assert!(!rows.is_empty(), "expected a non-empty keymap table");
+        for (_keys, label) in rows {
+            assert!(
+                text.contains(label),
+                "help overlay is missing the binding label {label:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod event;
+pub mod keymap;
 pub mod repository;
 pub mod session;
 pub mod ui;
