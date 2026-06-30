@@ -87,6 +87,8 @@ mod tests {
             repos: vec![Repository {
                 name: "r".to_string(),
                 path: PathBuf::from("/tmp/wtcc-statusbar-attn-none"),
+                setup: None,
+                archive: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,

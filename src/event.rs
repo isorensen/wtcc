@@ -352,6 +352,8 @@ mod tests {
             repos: vec![Repository {
                 name: "demo".to_string(),
                 path: PathBuf::from("/tmp/nope"),
+                setup: None,
+                archive: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -603,6 +605,8 @@ mod tests {
             .map(|i| Repository {
                 name: format!("repo{i}"),
                 path: PathBuf::from(format!("/tmp/repo{i}")),
+                setup: None,
+                archive: None,
             })
             .collect()
     }

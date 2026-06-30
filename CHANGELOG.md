@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Per-repo **lifecycle scripts**: an optional `setup` command runs once in a new
+  worktree on creation, and an optional `archive` command runs in the worktree
+  before it is removed (bounded by a timeout so a hanging script can't block
+  removal). Both are user-authored shell commands run via `sh -c` with the worktree
+  as the working directory — the command string is never interpolated (#49).
+
 ## [0.6.0] - 2026-06-30
 
 ### Added

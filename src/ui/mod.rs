@@ -288,6 +288,8 @@ mod tests {
             repos: vec![Repository {
                 name: "demo-repo".to_string(),
                 path: PathBuf::from("/tmp/demo-repo"),
+                setup: None,
+                archive: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,

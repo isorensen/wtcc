@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::session::{ActivityState, AttentionTracker, SessionManager};
@@ -13,6 +14,81 @@ use crate::worktree::{self, Worktree};
 pub enum Focus {
     Sidebar,
     Agent,
+}
+
+/// How long an ARCHIVE script may run before it is killed so worktree removal can
+/// proceed. A crude bound: the run is synchronous, so this caps how long a
+/// hanging user script can freeze the UI.
+pub const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Outcome of a bounded ARCHIVE run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveOutcome {
+    Success,
+    Failed,
+    TimedOut,
+}
+
+/// Runs a USER-AUTHORED archive command via `sh -c <command>` in `cwd`, bounded
+/// by `timeout`. SECURITY: the command is passed as a single, un-interpolated
+/// argv element and `cwd` is set with `current_dir` — the worktree path is never
+/// string-built into the command. On timeout the child is killed and `TimedOut`
+/// is returned without waiting for it to finish.
+pub fn run_archive(command: &str, cwd: &Path, timeout: Duration) -> ArchiveOutcome {
+    let mut child = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return ArchiveOutcome::Failed,
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    ArchiveOutcome::Success
+                } else {
+                    ArchiveOutcome::Failed
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    // Reap the SIGKILL'd `sh` immediately so it is not left a
+                    // zombie until wtcc exits; SIGKILL makes this near-instant.
+                    let _ = child.wait();
+                    return ArchiveOutcome::TimedOut;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return ArchiveOutcome::Failed,
+        }
+    }
+}
+
+/// Runs a USER-AUTHORED setup command once via `sh -c <command>` in `cwd`,
+/// detached on a background thread so worktree creation never blocks on it.
+/// SECURITY: the command is passed as a single, un-interpolated argv element and
+/// `cwd` is set with `current_dir` — the worktree path is never string-built into
+/// the command. Best-effort: a spawn failure is swallowed and the child is reaped
+/// inside the thread by `.status()` (which waits off the UI thread).
+pub fn spawn_setup(command: &str, cwd: &Path) {
+    let command = command.to_string();
+    let cwd = cwd.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&cwd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
 }
 
 /// What the user is being prompted for while an inline input overlay is open.
@@ -377,8 +453,18 @@ impl App {
         };
         match result {
             Ok(()) => {
-                self.status = Some(format!("added worktree {branch}"));
                 self.refresh_worktrees();
+                // SETUP runs once in the new worktree, best-effort and detached.
+                if let Some(setup) = self
+                    .selected_repo
+                    .and_then(|i| self.config.repos.get(i))
+                    .and_then(|r| r.setup.clone())
+                {
+                    self.status = Some(format!("added worktree {branch}; running setup…"));
+                    spawn_setup(&setup, &new_path);
+                } else {
+                    self.status = Some(format!("added worktree {branch}"));
+                }
             }
             Err(e) => self.status = Some(format!("add failed: {e}")),
         }
@@ -462,25 +548,46 @@ impl App {
             self.status = Some("no repo selected".to_string());
             return;
         };
-        // `Session::Drop` detaches without killing tmux (for reattach), so the
-        // explicit remove path is the only place that reaps the agent's
-        // `wtcc-<slug>` session. Best-effort kill keyed off the worktree's branch.
-        if let Some(branch) = self
+        // Spec ordering: kill agent session -> archive -> git remove. The agent
+        // is reaped first so it is quiescent before the archive runs (it can't be
+        // writing files mid-archive).
+        let branch = self
             .worktrees
             .iter()
             .find(|w| w.path == path)
-            .map(|w| w.branch.clone())
-        {
-            let name = SessionManager::session_name(&branch);
+            .map(|w| w.branch.clone());
+        // `Session::Drop` detaches without killing tmux (for reattach), so the
+        // explicit remove path is the only place that reaps the agent's
+        // `wtcc-<slug>` session. Best-effort kill keyed off the worktree's branch.
+        if let Some(branch) = branch.as_deref() {
+            let name = SessionManager::session_name(branch);
             self.session_manager.kill(&name);
             if self.active_session.as_deref() == Some(name.as_str()) {
                 self.active_session = None;
             }
         }
+        // ARCHIVE runs in the worktree dir, after the agent is killed and before
+        // git removes the worktree. Bounded so a hanging script can't freeze the
+        // UI; on failure or timeout removal proceeds anyway, with the outcome
+        // folded into the final status.
+        let archive_note = self
+            .selected_repo
+            .and_then(|i| self.config.repos.get(i))
+            .and_then(|r| r.archive.clone())
+            .and_then(|cmd| match run_archive(&cmd, path, ARCHIVE_TIMEOUT) {
+                ArchiveOutcome::Success => None,
+                ArchiveOutcome::Failed => Some("archive failed"),
+                ArchiveOutcome::TimedOut => Some("archive timed out"),
+            });
         match worktree::remove(&repo, path) {
             Ok(()) => {
-                self.status = Some("removed worktree".to_string());
+                // `refresh_worktrees` clears `status` on success, so set the
+                // outcome (incl. any archive note) afterwards to keep it visible.
                 self.refresh_worktrees();
+                self.status = Some(match archive_note {
+                    Some(note) => format!("removed worktree ({note})"),
+                    None => "removed worktree".to_string(),
+                });
             }
             Err(e) => self.status = Some(format!("remove failed: {e}")),
         }
@@ -507,6 +614,7 @@ mod tests {
     use crate::repository::Repository;
     use crate::vcs::{ChecksState, PrState, PrStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     /// Returns a fixed dirty/PR status for every worktree.
     struct FakeProvider {
@@ -547,6 +655,8 @@ mod tests {
             repos: vec![Repository {
                 name: "demo".to_string(),
                 path: PathBuf::from("/tmp/does-not-exist-demo"),
+                setup: None,
+                archive: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -729,10 +839,14 @@ mod tests {
                     Repository {
                         name: "repo-a".to_string(),
                         path: repo_a,
+                        setup: None,
+                        archive: None,
                     },
                     Repository {
                         name: "repo-b".to_string(),
                         path: repo_b,
+                        setup: None,
+                        archive: None,
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -984,5 +1098,66 @@ mod tests {
     fn poll_attention_is_empty_without_sessions() {
         let mut app = app_with_fake_worktrees();
         assert!(app.poll_attention().is_empty());
+    }
+
+    // --- issue #49: bounded archive runner ----------------------------------
+    //
+    // TDD RED: `run_archive` is the synchronous, timed cleanup seam. It runs a
+    // USER-AUTHORED command via `sh -c <command>` with `current_dir(cwd)` and a
+    // hard timeout. A zero exit -> Success, non-zero -> Failed, and a command
+    // that outlives the timeout is killed and reported as TimedOut WITHOUT
+    // waiting for it to finish. The path/branch is NEVER interpolated into the
+    // command string — cwd is set via `current_dir`, proven here by a command
+    // that uses a shell redirect and reads `$PWD`.
+
+    #[test]
+    fn run_archive_reports_success_on_zero_exit() {
+        let out = run_archive("true", &std::env::temp_dir(), Duration::from_secs(5));
+        assert_eq!(out, ArchiveOutcome::Success);
+    }
+
+    #[test]
+    fn run_archive_reports_failed_on_nonzero_exit() {
+        let out = run_archive("exit 7", &std::env::temp_dir(), Duration::from_secs(5));
+        assert_eq!(out, ArchiveOutcome::Failed);
+    }
+
+    #[test]
+    fn run_archive_kills_and_reports_timeout_without_waiting_for_a_slow_script() {
+        let start = Instant::now();
+        let out = run_archive(
+            "sleep 30",
+            &std::env::temp_dir(),
+            Duration::from_millis(200),
+        );
+        assert_eq!(out, ArchiveOutcome::TimedOut);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "must wait for the timeout before killing, not report TimedOut early (took {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a hanging archive must be killed at the timeout, not waited on (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn run_archive_executes_in_the_given_cwd_via_a_shell() {
+        // A redirect requires a real shell (`sh -c`), and `pwd -P` proves the
+        // command ran with cwd set via `current_dir` — never string-interpolated.
+        let out_dir = tempfile::tempdir().unwrap();
+        let marker = out_dir.path().join("cwd.txt");
+        let cwd = tempfile::tempdir().unwrap();
+        let cmd = format!("pwd -P > {}", marker.display());
+
+        let out = run_archive(&cmd, cwd.path(), Duration::from_secs(5));
+
+        assert_eq!(out, ArchiveOutcome::Success);
+        let recorded = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            recorded.trim(),
+            cwd.path().canonicalize().unwrap().to_string_lossy()
+        );
     }
 }
