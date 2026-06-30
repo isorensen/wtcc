@@ -458,6 +458,21 @@ impl App {
             self.status = Some("no repo selected".to_string());
             return;
         };
+        // `Session::Drop` detaches without killing tmux (for reattach), so the
+        // explicit remove path is the only place that reaps the agent's
+        // `wtcc-<slug>` session. Best-effort kill keyed off the worktree's branch.
+        if let Some(branch) = self
+            .worktrees
+            .iter()
+            .find(|w| w.path == path)
+            .map(|w| w.branch.clone())
+        {
+            let name = SessionManager::session_name(&branch);
+            self.session_manager.kill(&name);
+            if self.active_session.as_deref() == Some(name.as_str()) {
+                self.active_session = None;
+            }
+        }
         match worktree::remove(&repo, path) {
             Ok(()) => {
                 self.status = Some("removed worktree".to_string());
@@ -609,6 +624,63 @@ mod tests {
         app.restart_agent("main");
         assert_eq!(app.status.as_deref(), Some("restarting agent for main"));
         assert_eq!(app.active_session, None);
+    }
+
+    // --- issue #46: removing a worktree must kill its agent session ----------
+    //
+    // `Session::Drop` intentionally detaches without killing tmux (for
+    // reattach/persistence), so the ONLY place the explicit remove path can
+    // reap the `wtcc-<slug>` session is `remove_worktree`. The git removal runs
+    // against a fake repo path here and fails, but the kill is keyed off the
+    // removed worktree's branch and happens around/before that removal, so the
+    // session side-effect is observable without tmux or a real repo.
+
+    #[test]
+    fn remove_worktree_kills_removed_worktrees_session_clears_active_and_keeps_others() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees(); // main(/repo/main), feat(/repo/feat)
+        let main = SessionManager::session_name("main");
+        let feat = SessionManager::session_name("feat");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        app.session_manager
+            .insert_spawned(&main, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&feat, b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(main.clone());
+
+        app.remove_worktree(&PathBuf::from("/repo/main"));
+
+        assert!(
+            app.session_manager.get(&main).is_none(),
+            "removing a worktree must kill its wtcc-<slug> agent session"
+        );
+        assert!(
+            app.session_manager.get(&feat).is_some(),
+            "removing one worktree must leave every other worktree's session intact"
+        );
+        assert_eq!(
+            app.active_session, None,
+            "active_session must clear when the removed worktree was the active one"
+        );
+    }
+
+    #[test]
+    fn remove_worktree_without_live_session_is_safe() {
+        let mut app = app_with_fake_worktrees();
+        let feat = SessionManager::session_name("feat");
+        // No session was ever spawned for feat: the best-effort kill must not
+        // panic and must leave no session behind.
+        app.remove_worktree(&PathBuf::from("/repo/feat"));
+        assert!(
+            app.session_manager.get(&feat).is_none(),
+            "absent session stays absent; kill is best-effort"
+        );
     }
 
     #[test]

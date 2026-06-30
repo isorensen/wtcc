@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format is based on
   test and a completeness-by-construction help overlay. No user-visible behavior
   change (#43).
 
+### Fixed
+- Removing a worktree now kills its agent's `tmux` session (`wtcc-<slug>`) instead
+  of leaking a detached session. The kill is best-effort and only on the explicit
+  remove path — the restart/reattach persistence behavior is unchanged (#46).
+
 ## [0.5.0] - 2026-06-22
 
 ### Added
