@@ -128,6 +128,23 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
     }
 }
 
+/// Applies a wheel-scroll at column `col` to the app. Scrolling within the
+/// sidebar columns moves the selection like `j`/`k`, reusing the same
+/// [`Action::Next`]/[`Action::Prev`] navigation; scrolling over the agent pane
+/// (or any column outside the sidebar) is inert. Overlays absorb scroll. Pure
+/// state transition: no terminal I/O, never panics on out-of-range columns.
+///
+/// Pointing the wheel at the sidebar acts on the sidebar regardless of current
+/// focus, mirroring how clicking a sidebar row focuses it: focus moves to the
+/// sidebar first so navigation runs even when the agent pane holds focus.
+pub fn handle_scroll(app: &mut App, up: bool, col: u16) {
+    if !matches!(app.overlay, Overlay::None) || col >= SIDEBAR_WIDTH {
+        return;
+    }
+    app.focus = Focus::Sidebar;
+    run_action(app, if up { Action::Prev } else { Action::Next });
+}
+
 fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
     // Ctrl-O returns focus to the sidebar (not forwarded); every other key
     // falls through to the agent's PTY.
@@ -693,5 +710,69 @@ mod tests {
         handle_mouse(&mut a, SIDEBAR_WIDTH + 2, 4, area());
         assert_eq!(a.focus, Focus::Sidebar);
         assert_eq!(a.overlay, Overlay::Help);
+    }
+
+    // --- issue #45: wheel scroll moves sidebar selection -------------------
+
+    #[test]
+    fn scroll_down_in_sidebar_advances_selection() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        handle_scroll(&mut a, false, 2);
+        assert_eq!(a.selected_worktree, Some(1));
+    }
+
+    #[test]
+    fn scroll_up_in_sidebar_moves_selection_back() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(1);
+        handle_scroll(&mut a, true, 2);
+        assert_eq!(a.selected_worktree, Some(0));
+    }
+
+    #[test]
+    fn scroll_in_agent_region_is_noop() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        let before_focus = a.focus;
+        handle_scroll(&mut a, false, SIDEBAR_WIDTH + 2);
+        assert_eq!(a.selected_worktree, Some(0));
+        assert_eq!(a.focus, before_focus);
+    }
+
+    #[test]
+    fn scroll_over_sidebar_in_agent_focus_moves_selection() {
+        // Design decision (issue #45): pointing the wheel at the sidebar moves
+        // the selection even when the agent pane holds focus, like clicking a row.
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        a.focus = Focus::Agent;
+        handle_scroll(&mut a, false, 2);
+        assert_eq!(a.selected_worktree, Some(1));
+        assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn scroll_ignored_while_overlay_open() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        a.overlay = Overlay::Help;
+        handle_scroll(&mut a, false, 2);
+        assert_eq!(a.selected_worktree, Some(0));
+        assert_eq!(a.overlay, Overlay::Help);
+    }
+
+    #[test]
+    fn scroll_does_not_panic_on_out_of_range_col() {
+        let mut a = app();
+        a.worktrees = worktrees(2);
+        a.selected_worktree = Some(0);
+        handle_scroll(&mut a, false, 1000);
+        handle_scroll(&mut a, true, 1000);
     }
 }

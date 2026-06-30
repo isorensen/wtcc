@@ -15,6 +15,9 @@ All notable changes to this project are documented here. The format is based on
   "Jump to attention" command) to jump to the next agent needing attention.
   With `notify = true` in the config, a `notify-send` desktop notification fires
   per newly-flagged agent (missing `notify-send` degrades silently) (#47).
+- Mouse **wheel scroll** over the sidebar moves the selection (up/down), regardless
+  of which pane has focus — consistent with clicking a sidebar row. Scrolling over
+  the agent pane is a no-op (#45).
 
 ### Changed
 - Refactored the keymap into a single data-driven source of truth (`src/keymap.rs`):
