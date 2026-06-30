@@ -56,6 +56,7 @@ fn base_app() -> App {
         archived: Vec::new(),
         base_ref: None,
         copy_on_create: Vec::new(),
+        run: None,
     }];
     let mut app = App::new(cfg);
     app.worktrees = vec![Worktree {

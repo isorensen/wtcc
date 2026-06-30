@@ -25,6 +25,7 @@ pub enum Action {
     RemoveWorktree,
     RenameBranch,
     RestartAgent,
+    RunScript,
     JumpAttention,
     SwitchRepo,
     SwitchAgent,
@@ -45,7 +46,7 @@ pub enum Action {
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -58,6 +59,7 @@ impl Action {
         Action::RemoveWorktree,
         Action::RenameBranch,
         Action::RestartAgent,
+        Action::RunScript,
         Action::JumpAttention,
         Action::SwitchRepo,
         Action::SwitchAgent,
@@ -92,6 +94,7 @@ impl Action {
             Action::RemoveWorktree => "Remove worktree",
             Action::RenameBranch => "Rename branch",
             Action::RestartAgent => "Restart agent",
+            Action::RunScript => "Run script",
             Action::JumpAttention => "Jump to attention",
             Action::SwitchRepo => "Switch repo",
             Action::SwitchAgent => "Switch agent",
@@ -121,6 +124,7 @@ impl Action {
                 | Action::RemoveWorktree
                 | Action::RenameBranch
                 | Action::RestartAgent
+                | Action::RunScript
                 | Action::JumpAttention
                 | Action::SwitchRepo
                 | Action::SwitchAgent
@@ -230,6 +234,12 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('R'))],
         action: Action::RestartAgent,
+    },
+    // Run script (issue #56). Sidebar-focus only: in agent focus every printable
+    // key forwards to the PTY, so `s` lives here and in the palette.
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('s'))],
+        action: Action::RunScript,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char('A'))],

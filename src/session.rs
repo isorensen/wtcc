@@ -35,6 +35,32 @@ pub fn rename_session_argv(old: &str, new: &str) -> Vec<String> {
     ]
 }
 
+/// The dedicated tmux session name for a worktree's Run tab: `wtcc-run-<slug>`,
+/// distinct from the agent (`wtcc-<slug>`) and shell (`wtcc-<slug>-t<n>`)
+/// surfaces so kill-on-remove can target it precisely. `branch` is slugified so
+/// untrusted names are safe in the session name.
+pub fn run_session_name(branch: &str) -> String {
+    format!("wtcc-run-{}", crate::worktree::slugify(branch))
+}
+
+/// Builds the tmux argv for a Run tab: `new-session -A -s <name> <command>`.
+/// SECURITY/CORRECTNESS: the user-authored `command` is the SINGLE, un-interpolated
+/// trailing element — tmux hands it to `$SHELL -c "<command>"`, so the shell (not
+/// wtcc) parses it. We deliberately do NOT add our own `sh -c` wrapper: tmux joins
+/// trailing positional args with spaces, so `["sh","-c",command]` would collapse to
+/// `sh -c <command>`, the outer `$SHELL -c` would word-split it, and the inner `sh`
+/// would run only the first word (e.g. `pnpm dev` → just `pnpm`). One trailing
+/// element keeps the whole command intact. No slug/branch/path is concatenated in.
+pub fn run_argv(name: &str, command: &str) -> Vec<String> {
+    vec![
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        name.to_string(),
+        command.to_string(),
+    ]
+}
+
 /// Classifies a session's activity from how long it has been idle. `None` input
 /// means there is no session. Pure and total: the sole place the threshold is
 /// applied, so the heuristic is unit-testable without a PTY.
@@ -295,6 +321,31 @@ impl SessionManager {
         if !self.sessions.contains_key(name) {
             let s = Session::spawn(name, command, cwd, rows, cols)?;
             self.sessions.insert(name.to_string(), s);
+        }
+        Ok(self.sessions.get(name).unwrap())
+    }
+
+    /// Ensures a Run-tab session named `name` running the user-authored `command`
+    /// in `cwd`. tmux runs the command via `$SHELL -c "<command>"`, so `command`
+    /// is passed as a single, un-interpolated trailing argv element (see [`run_argv`])
+    /// and `cwd` is set on the PTY child — never string-built. Funnels into the same
+    /// `Session::spawn_with_command` core as every other surface; idempotent like
+    /// [`ensure_named`](Self::ensure_named).
+    pub fn ensure_run(
+        &mut self,
+        name: &str,
+        command: &str,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+    ) -> anyhow::Result<&Session> {
+        if !self.sessions.contains_key(name) {
+            let mut cmd = CommandBuilder::new("tmux");
+            for arg in run_argv(name, command) {
+                cmd.arg(arg);
+            }
+            let session = Session::spawn_with_command(cmd, cwd, rows, cols)?;
+            self.sessions.insert(name.to_string(), session);
         }
         Ok(self.sessions.get(name).unwrap())
     }
@@ -769,6 +820,54 @@ mod tests {
         assert_eq!(
             SessionManager::session_name("Feature/Big Thing"),
             "wtcc-feature-big-thing"
+        );
+    }
+
+    // --- issue #56: per-repo `run` command surface --------------------------
+    //
+    // TDD RED: a worktree's run command gets a DEDICATED, slug-prefixed session
+    // name (`wtcc-run-<slug>`) distinct from the agent (`wtcc-<slug>`) and shell
+    // (`wtcc-<slug>-t<n>`) surfaces, so kill-on-remove can target it precisely.
+    // The user-authored command reaches tmux (which runs it via `$SHELL -c`) as a
+    // SINGLE, un-interpolated trailing argv element — no `sh -c` wrapper of our own
+    // (that would be word-split, dropping every word after the first). `run_argv`
+    // is the pure seam that builds it — no slug/branch/path is concatenated in.
+
+    #[test]
+    fn run_session_name_is_slug_prefixed() {
+        assert_eq!(run_session_name("Feature/Foo"), "wtcc-run-feature-foo");
+        assert_eq!(run_session_name("main"), "wtcc-run-main");
+    }
+
+    #[test]
+    fn run_argv_passes_the_command_as_a_single_un_interpolated_element() {
+        // tmux runs the trailing arg via `$SHELL -c "<command>"`, so the shell —
+        // not wtcc — parses it, and metacharacters survive. Two invariants pin the
+        // word-dropping bug: (1) the multi-word command is ONE verbatim trailing
+        // element, and (2) there is NO `sh`/`-c` wrapper — such a wrapper would be
+        // joined by tmux into `sh -c <command>`, word-split by the outer shell, and
+        // run only the first word (`pnpm dev` → `pnpm`).
+        let name = "wtcc-run-demo";
+        let cmd = "pnpm dev && echo done";
+        let argv = run_argv(name, cmd);
+        assert_eq!(
+            argv,
+            vec![
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                name.to_string(),
+                cmd.to_string(),
+            ]
+        );
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some(cmd),
+            "the multi-word command is one un-split, un-interpolated trailing element"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "sh" || a == "-c"),
+            "no sh/-c wrapper: tmux would join it and the outer shell would word-split"
         );
     }
 }

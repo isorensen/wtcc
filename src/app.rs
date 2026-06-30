@@ -431,6 +431,33 @@ impl App {
             .add_shell_tab(&slug);
     }
 
+    /// The selected repo's `run` command, if any. Re-resolved at spawn time so the
+    /// Run tab need not store the command.
+    fn selected_run_command(&self) -> Option<String> {
+        self.selected_repo
+            .and_then(|i| self.config.repos.get(i))
+            .and_then(|r| r.run.clone())
+    }
+
+    /// Opens (or re-focuses) the current worktree's Run tab, backed by the
+    /// `wtcc-run-<slug>` session. In-memory only — the real PTY (`sh -c <run>`)
+    /// spawns next frame in `ensure_active_session`. With no `run` configured for
+    /// the selected repo, nothing is opened and the reason is surfaced in `status`.
+    pub fn start_run_script(&mut self) {
+        if self.selected_run_command().is_none() {
+            self.status = Some("no run command configured for this repo".to_string());
+            return;
+        }
+        let Some(slug) = self.current_slug() else {
+            self.status = Some("no worktree selected".to_string());
+            return;
+        };
+        self.layouts
+            .entry(slug.clone())
+            .or_insert_with(|| WorktreeLayout::new(&slug))
+            .add_run_tab(&slug);
+    }
+
     /// Focuses the next tab of the current worktree (wrapping). No-op if no layout.
     pub fn next_tab(&mut self) {
         if let Some(layout) = self.layout_for_current() {
@@ -488,14 +515,32 @@ impl App {
             .active_tab()
             .clone();
         let agent_cmd = self.config.agent_cmd_for(&branch);
-        let command = match tab.kind {
-            TabKind::Agent => Some(agent_cmd),
-            TabKind::Shell => None,
+        let run_cmd = self.selected_run_command();
+        let result = match tab.kind {
+            TabKind::Agent => self.session_manager.ensure_named(
+                &tab.session,
+                &path,
+                Some(agent_cmd.as_str()),
+                rows,
+                cols,
+            ),
+            TabKind::Shell => {
+                self.session_manager
+                    .ensure_named(&tab.session, &path, None, rows, cols)
+            }
+            // SECURITY: the run command reaches tmux (run via `$SHELL -c`) as a single
+            // un-interpolated trailing argv element via `ensure_run`. A run tab with no configured command
+            // (config edited away after opening) degrades to a plain shell.
+            TabKind::Run => match run_cmd.as_deref() {
+                Some(cmd) => self
+                    .session_manager
+                    .ensure_run(&tab.session, cmd, &path, rows, cols),
+                None => self
+                    .session_manager
+                    .ensure_named(&tab.session, &path, None, rows, cols),
+            },
         };
-        match self
-            .session_manager
-            .ensure_named(&tab.session, &path, command.as_deref(), rows, cols)
-        {
+        match result {
             Ok(_) => self.active_session = Some(tab.session),
             Err(e) => self.status = Some(format!("agent spawn failed: {e}")),
         }
@@ -1064,6 +1109,7 @@ mod tests {
                 archived: Vec::new(),
                 base_ref: None,
                 copy_on_create: Vec::new(),
+                run: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -1319,6 +1365,7 @@ mod tests {
                         archived: Vec::new(),
                         base_ref: None,
                         copy_on_create: Vec::new(),
+                        run: None,
                     },
                     Repository {
                         name: "repo-b".to_string(),
@@ -1328,6 +1375,7 @@ mod tests {
                         archived: Vec::new(),
                         base_ref: None,
                         copy_on_create: Vec::new(),
+                        run: None,
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -1630,6 +1678,7 @@ mod tests {
                     archived: Vec::new(),
                     base_ref: None,
                     copy_on_create: Vec::new(),
+                    run: None,
                 }],
                 agent_cmd: "claude".to_string(),
                 notify: true,
@@ -2181,6 +2230,113 @@ mod tests {
             app.current_slug().as_deref(),
             Some("feature-big-thing"),
             "current_slug must slugify untrusted branch names before they key state"
+        );
+    }
+
+    // --- issue #56: per-repo `run` command into a Run tab -------------------
+    //
+    // TDD RED: `App::start_run_script` opens a dedicated Run tab for the selected
+    // worktree (reusing the #48 tabs surface, NOT a bespoke pane toggle) backed
+    // by the `wtcc-run-<slug>` session. With no `run` configured it spawns nothing
+    // and explains via status. Removing the worktree kills the run session along
+    // with every other tab surface (extends the existing remove cleanup).
+    // `insert_spawned` seeds live sessions so the kill side-effect is observable
+    // without tmux.
+
+    #[test]
+    fn start_run_script_with_no_run_configured_opens_no_tab_and_sets_status() {
+        let mut app = app_with_fake_worktrees(); // main selected, run defaults None
+        assert_eq!(app.config.repos[0].run, None);
+        app.status = None;
+
+        app.start_run_script();
+
+        let no_run_tab = app
+            .layouts
+            .get("main")
+            .is_none_or(|l| l.tabs.iter().all(|t| t.kind != crate::layout::TabKind::Run));
+        assert!(no_run_tab, "no run script -> no Run tab is opened");
+        assert!(
+            app.status.is_some(),
+            "no run script must explain via status"
+        );
+        assert!(
+            app.session_manager
+                .get(&crate::session::run_session_name("main"))
+                .is_none(),
+            "no run script must spawn nothing"
+        );
+    }
+
+    #[test]
+    fn start_run_script_with_run_configured_appends_a_focused_run_tab() {
+        let mut app = app_with_fake_worktrees(); // main selected
+        app.config.repos[0].run = Some("pnpm dev".to_string());
+
+        app.start_run_script();
+
+        let layout = app
+            .layouts
+            .get("main")
+            .expect("start_run_script must create/keep the worktree layout");
+        assert!(
+            layout.tabs.len() >= 2,
+            "a Run tab is appended alongside the agent tab"
+        );
+        let run_tab = layout
+            .tabs
+            .iter()
+            .find(|t| t.kind == crate::layout::TabKind::Run)
+            .expect("a Run tab must be appended");
+        assert_eq!(
+            run_tab.session,
+            crate::session::run_session_name("main"),
+            "the Run tab is backed by the wtcc-run-<slug> session"
+        );
+        assert_eq!(run_tab.session, "wtcc-run-main");
+        assert!(
+            run_tab.title == "run" || run_tab.title == "pnpm dev",
+            "a run tab's title is 'run' or the command, got {:?}",
+            run_tab.title
+        );
+        assert_eq!(
+            layout.active_tab().kind,
+            crate::layout::TabKind::Run,
+            "the appended Run tab is focused"
+        );
+    }
+
+    #[test]
+    fn remove_worktree_kills_the_run_session_and_keeps_others() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees(); // main(/repo/main), feat(/repo/feat)
+        app.config.repos[0].run = Some("pnpm dev".to_string());
+        // Open the run tab so the run session is part of main's layout.
+        app.start_run_script();
+
+        let run = crate::session::run_session_name("main"); // wtcc-run-main
+        let feat = SessionManager::session_name("feat");
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        app.session_manager
+            .insert_spawned(&run, a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&feat, b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+
+        app.remove_worktree(&PathBuf::from("/repo/main"));
+
+        assert!(
+            app.session_manager.get(&run).is_none(),
+            "removing a worktree must kill its wtcc-run-<slug> session"
+        );
+        assert!(
+            app.session_manager.get(&feat).is_some(),
+            "removing one worktree must leave every other worktree's session intact"
         );
     }
 }
