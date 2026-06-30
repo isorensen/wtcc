@@ -20,7 +20,7 @@ use ratatui::layout::Rect;
 
 use wtcc::app::App;
 use wtcc::config::Config;
-use wtcc::event::{handle_key, handle_mouse};
+use wtcc::event::{handle_key, handle_mouse, handle_scroll};
 use wtcc::ui;
 
 const POLL: Duration = Duration::from_millis(16);
@@ -119,6 +119,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
                 }
                 Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
                     handle_mouse(&mut app, m.column, m.row, area);
+                }
+                Event::Mouse(m)
+                    if matches!(
+                        m.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    handle_scroll(&mut app, m.kind == MouseEventKind::ScrollUp, m.column);
                 }
                 _ => {}
             }
