@@ -35,6 +35,7 @@ fn app_one_worktree() -> App {
             path: PathBuf::from("/tmp/wtcc-issue44-nonexistent"),
             setup: None,
             archive: None,
+            archived: Vec::new(),
         }],
         agent_cmd: "claude".to_string(),
         notify: true,

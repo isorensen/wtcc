@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Archive worktrees** (`x` to archive/unarchive, `X` to show/hide archived):
+  soft-hides a worktree from the sidebar without touching git or disk. Archived
+  rows are dimmed when shown and skipped by `j`/`k` navigation when hidden, so
+  selection never lands on an invisible row. The archived set persists per repo (#53).
 - **Per-worktree agent presets** (`A`): define named agents in the config
   (`[[agents]]` with `name`/`cmd`) and pick one per worktree; the choice persists
   and the agent restarts with the new command. Falls back to the existing

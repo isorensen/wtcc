@@ -75,6 +75,7 @@ fn base_app() -> App {
             path: std::path::PathBuf::from("/tmp/wtcc-issue51-does-not-exist"),
             setup: None,
             archive: None,
+            archived: Vec::new(),
         }],
         ..Default::default()
     };
