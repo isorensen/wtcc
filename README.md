@@ -112,6 +112,7 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `r` | Refresh worktrees |
 | `t` / `w` | New shell tab / close the active shell tab |
 | `]` / `[` | Next / previous tab |
+| `s` | Run the repo's configured `run` command in a tab |
 | `g` | Jump to the next agent needing attention |
 | `o` | Open the worktree's PR in the browser |
 | `m` | Merge the worktree's PR (confirm first) |

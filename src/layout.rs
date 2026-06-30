@@ -19,6 +19,8 @@ use crate::worktree::slugify;
 pub enum TabKind {
     Agent,
     Shell,
+    /// Runs the repo's `run` command (`wtcc-run-<slug>`) via tmux `$SHELL -c` (issue #56).
+    Run,
 }
 
 /// A single terminal surface within a worktree: its kind, the named tmux/PTY
@@ -68,6 +70,22 @@ impl WorktreeLayout {
         });
         self.active = self.tabs.len() - 1;
         self.next_id += 1;
+    }
+
+    /// Appends a Run surface (`wtcc-run-<slug>`) and focuses it. A worktree has at
+    /// most one Run tab: if one already exists it is simply re-focused (the command
+    /// is re-resolved from config at spawn time, so no command is stored here).
+    pub fn add_run_tab(&mut self, slug: &str) {
+        if let Some(i) = self.tabs.iter().position(|t| t.kind == TabKind::Run) {
+            self.active = i;
+            return;
+        }
+        self.tabs.push(Tab {
+            kind: TabKind::Run,
+            session: crate::session::run_session_name(slug),
+            title: "run".to_string(),
+        });
+        self.active = self.tabs.len() - 1;
     }
 
     /// The currently focused tab. The model always keeps at least the agent tab,

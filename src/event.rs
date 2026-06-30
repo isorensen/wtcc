@@ -398,6 +398,7 @@ fn run_action(app: &mut App, action: Action) {
         Action::RemoveWorktree => request_remove(app),
         Action::RenameBranch => open_rename_prompt(app),
         Action::RestartAgent => request_restart_agent(app),
+        Action::RunScript => app.start_run_script(),
         Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),
         Action::SwitchAgent => open_switch_agent_prompt(app),
@@ -439,6 +440,7 @@ mod tests {
                 archived: Vec::new(),
                 base_ref: None,
                 copy_on_create: Vec::new(),
+                run: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -697,6 +699,7 @@ mod tests {
                 archived: Vec::new(),
                 base_ref: None,
                 copy_on_create: Vec::new(),
+                run: None,
             })
             .collect()
     }

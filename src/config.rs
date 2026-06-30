@@ -156,6 +156,7 @@ mod tests {
                 archived: Vec::new(),
                 base_ref: None,
                 copy_on_create: Vec::new(),
+                run: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -223,6 +224,7 @@ mod tests {
                 archived: Vec::new(),
                 base_ref: None,
                 copy_on_create: Vec::new(),
+                run: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -511,6 +513,7 @@ mod tests {
                 name: "demo".to_string(),
                 path: PathBuf::from("/home/user/demo"),
                 copy_on_create: Vec::new(),
+                run: None,
                 ..Default::default()
             }],
             ..Default::default()
@@ -547,5 +550,67 @@ mod tests {
             loaded.repos[0].copy_on_create,
             vec![".env".to_string(), "config/local.toml".to_string()]
         );
+    }
+
+    // --- issue #56: per-repo `run` command ----------------------------------
+    //
+    // TDD RED: `Repository.run: Option<String>` is additive and back-compatible,
+    // exactly like setup/archive/base_ref. A repos entry written before #56 has
+    // no `run` key and must load as `None` (serde default); an unset `run` is
+    // omitted on save (skip_serializing_if), and a populated one round-trips.
+
+    #[test]
+    fn legacy_repo_entry_without_run_loads_as_none() {
+        let cfg: Config = toml::from_str(
+            "agent_cmd = \"claude\"\n[[repos]]\nname = \"demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.repos[0].run, None);
+    }
+
+    #[test]
+    fn run_round_trips_and_none_is_omitted_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // An unset run must be omitted from the serialized output.
+        let none_path = dir.path().join("none.toml");
+        Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                run: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_to(&none_path)
+        .unwrap();
+        let none_serialized = std::fs::read_to_string(&none_path).unwrap();
+        assert!(
+            !none_serialized.contains("run"),
+            "a None run must be omitted via skip_serializing_if, got:\n{none_serialized}"
+        );
+
+        // A populated run must serialize and round-trip exactly.
+        let populated_path = dir.path().join("populated.toml");
+        let original = Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                run: Some("pnpm dev".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        original.save_to(&populated_path).unwrap();
+        let serialized = std::fs::read_to_string(&populated_path).unwrap();
+        assert!(
+            serialized.contains("run") && serialized.contains("pnpm dev"),
+            "a populated run must be serialized, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&populated_path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.repos[0].run.as_deref(), Some("pnpm dev"));
     }
 }

@@ -29,6 +29,11 @@ pub struct Repository {
     /// over. Absent in legacy configs and omitted from output when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copy_on_create: Vec<String>,
+    /// User-authored command launched on a keypress into a dedicated Run tab,
+    /// e.g. `pnpm dev` or `cargo test`. Run via `sh -c <command>` in the worktree
+    /// dir. Absent in legacy configs and omitted from output when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -63,6 +68,7 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         archived: Vec::new(),
         base_ref: None,
         copy_on_create: Vec::new(),
+        run: None,
     })
 }
 

@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Run dev command on key** (`s`): set a per-repo `run` command (e.g. `pnpm dev`,
+  `cargo test`) and press `s` to launch it in a dedicated run tab
+  (`wtcc-run-<slug>`) in the worktree directory. No `run` configured → a status
+  message, no tab. The command is handed to `tmux`/`$SHELL -c` as a single
+  un-interpolated element, so multi-word commands and shell operators work (#56).
 - **Per-worktree tabs**: a worktree can now host multiple terminal surfaces — the
   agent (tab 0) plus extra **shell tabs**. `t` opens a new shell tab, `w` closes the
   active shell tab (the agent tab is protected), `]` / `[` cycle tabs. A tab strip
