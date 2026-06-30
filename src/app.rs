@@ -495,7 +495,11 @@ impl App {
         let result = if worktree::branch_exists(&repo, branch) {
             worktree::add_existing_branch(&repo, &new_path, branch)
         } else {
-            worktree::add_new_branch(&repo, &new_path, branch)
+            let base_ref = self
+                .selected_repo
+                .and_then(|i| self.config.repos.get(i))
+                .and_then(|r| r.base_ref.clone());
+            worktree::add_new_branch(&repo, &new_path, branch, base_ref.as_deref())
         };
         match result {
             Ok(()) => {
@@ -952,6 +956,7 @@ mod tests {
                 setup: None,
                 archive: None,
                 archived: Vec::new(),
+                base_ref: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -1204,6 +1209,7 @@ mod tests {
                         setup: None,
                         archive: None,
                         archived: Vec::new(),
+                        base_ref: None,
                     },
                     Repository {
                         name: "repo-b".to_string(),
@@ -1211,6 +1217,7 @@ mod tests {
                         setup: None,
                         archive: None,
                         archived: Vec::new(),
+                        base_ref: None,
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -1510,6 +1517,7 @@ mod tests {
                     setup: None,
                     archive: None,
                     archived: Vec::new(),
+                    base_ref: None,
                 }],
                 agent_cmd: "claude".to_string(),
                 notify: true,
@@ -1804,6 +1812,89 @@ mod tests {
         assert!(
             !cfg_path.exists(),
             "a rejected switch must not persist the config"
+        );
+    }
+
+    // --- issue #54: per-repo base ref for NEW-branch worktrees --------------
+    //
+    // TDD RED (acceptance criterion #1): `App::add_worktree` on an UNKNOWN branch
+    // forks the new branch from the selected repo's `base_ref` when set, and from
+    // HEAD when unset (behavior identical to today). Exercised against a real git
+    // repo via the existing `init_git_repo`/`app_for_repo` seam.
+
+    fn rev_parse(repo: &Path, rev: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", rev])
+            .output()
+            .expect("git rev-parse");
+        assert!(
+            out.status.success(),
+            "git rev-parse {rev} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn git_in(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git must be installed");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn add_worktree_uses_repo_base_ref_for_new_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_git_repo(&repo);
+        // base ref pinned at commit A; HEAD then advances to B.
+        let base_commit = rev_parse(&repo, "HEAD");
+        git_in(&repo, &["branch", "the-base"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "B"]);
+        let head_commit = rev_parse(&repo, "HEAD");
+        assert_ne!(base_commit, head_commit);
+
+        let mut app = app_for_repo(repo.clone());
+        app.config.repos[0].base_ref = Some("the-base".to_string());
+
+        app.add_worktree("brand-new");
+
+        let wt = repo.join(".worktrees").join("brand-new");
+        let wt_head = rev_parse(&wt, "HEAD");
+        assert_eq!(
+            wt_head, base_commit,
+            "add_worktree must start the new branch at the repo's base_ref, not HEAD"
+        );
+        assert_ne!(wt_head, head_commit);
+    }
+
+    #[test]
+    fn add_worktree_without_base_ref_branches_from_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_git_repo(&repo);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "B"]);
+        let head_commit = rev_parse(&repo, "HEAD");
+
+        let mut app = app_for_repo(repo.clone());
+        app.config.repos[0].base_ref = None; // explicit: unset -> current behavior
+
+        app.add_worktree("brand-new");
+
+        let wt = repo.join(".worktrees").join("brand-new");
+        let wt_head = rev_parse(&wt, "HEAD");
+        assert_eq!(
+            wt_head, head_commit,
+            "with base_ref unset, a new branch forks from HEAD (unchanged)"
         );
     }
 }

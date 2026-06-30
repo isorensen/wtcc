@@ -90,6 +90,7 @@ mod tests {
                 setup: None,
                 archive: None,
                 archived: Vec::new(),
+                base_ref: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,

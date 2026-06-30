@@ -113,14 +113,39 @@ fn ref_resolves(repo: &str, reference: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Creates a worktree on a NEW branch: `git worktree add -b <branch> <path>`.
-/// `branch` is passed as a discrete argv arg (the literal branch name, not
-/// slugified); the caller slugifies only the derived filesystem `new_path`.
-pub fn add_new_branch(repo_path: &Path, new_path: &Path, branch: &str) -> anyhow::Result<()> {
+/// argv (after `-C <repo>`) for creating a worktree on a NEW branch:
+/// `["worktree", "add", "-b", <branch>, <path>]`. When `base` is set AND
+/// non-empty it is appended as the FINAL discrete element so the new branch
+/// forks from that ref instead of HEAD; `None` or `Some("")` reproduces today's
+/// HEAD-based argv exactly. Every element stays a discrete argv arg (never a
+/// shell string).
+pub fn add_new_branch_argv(new_path: &Path, branch: &str, base: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
+        "worktree".to_string(),
+        "add".to_string(),
+        "-b".to_string(),
+        branch.to_string(),
+        new_path.to_string_lossy().into_owned(),
+    ];
+    if let Some(base) = base.filter(|b| !b.is_empty()) {
+        argv.push(base.to_string());
+    }
+    argv
+}
+
+/// Creates a worktree on a NEW branch via `git -C <repo>` + [`add_new_branch_argv`].
+/// `branch` is the literal branch name (not slugified); the caller slugifies only
+/// the derived filesystem `new_path`. `base`, when set, is the start-point ref.
+pub fn add_new_branch(
+    repo_path: &Path,
+    new_path: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> anyhow::Result<()> {
     let repo = repo_path.to_string_lossy();
-    let new = new_path.to_string_lossy();
     let output = Command::new("git")
-        .args(["-C", &repo, "worktree", "add", "-b", branch, &new])
+        .args(["-C", &repo])
+        .args(add_new_branch_argv(new_path, branch, base))
         .output()?;
 
     if !output.status.success() {
@@ -271,5 +296,65 @@ bare
         assert_eq!(slugify("Multiple   Spaces"), "multiple-spaces");
         assert_eq!(slugify("UPPER"), "upper");
         assert_eq!(slugify("!!!"), "");
+    }
+
+    // --- issue #54: per-repo base ref for NEW-branch worktrees --------------
+    //
+    // TDD RED: a new-branch worktree may fork from a configured base ref instead
+    // of HEAD. `add_new_branch_argv(new_path, branch, base)` is the PURE argv seam
+    // (mirrors `rename_branch_argv`): it returns the args AFTER `-C <repo>`, i.e.
+    // `["worktree", "add", "-b", <branch>, <path>]`, with `<base>` appended as the
+    // FINAL DISCRETE element ONLY when it is set AND non-empty. This pins
+    // acceptance criterion #3 ("the base ref is a discrete argv element", never a
+    // shell string) without spawning git.
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn add_new_branch_argv_with_base_appends_it_as_final_discrete_arg() {
+        let got = add_new_branch_argv(
+            Path::new("/repo/.worktrees/feat"),
+            "feat",
+            Some("origin/main"),
+        );
+        assert_eq!(
+            got,
+            argv(&[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                "/repo/.worktrees/feat",
+                "origin/main",
+            ])
+        );
+        assert_eq!(
+            got.last().map(String::as_str),
+            Some("origin/main"),
+            "the base ref must be the final, discrete argv element"
+        );
+    }
+
+    #[test]
+    fn add_new_branch_argv_without_base_omits_it() {
+        let got = add_new_branch_argv(Path::new("/repo/.worktrees/feat"), "feat", None);
+        assert_eq!(
+            got,
+            argv(&["worktree", "add", "-b", "feat", "/repo/.worktrees/feat"]),
+            "None must reproduce today's argv exactly (branches from HEAD)"
+        );
+    }
+
+    #[test]
+    fn add_new_branch_argv_empty_base_is_treated_as_unset() {
+        // The contract is "set AND non-empty": a Some("") must not append an arg.
+        let got = add_new_branch_argv(Path::new("/repo/.worktrees/feat"), "feat", Some(""));
+        assert_eq!(
+            got,
+            argv(&["worktree", "add", "-b", "feat", "/repo/.worktrees/feat"]),
+            "an empty base ref must be omitted, same as None"
+        );
     }
 }

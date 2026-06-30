@@ -154,6 +154,7 @@ mod tests {
                 setup: None,
                 archive: None,
                 archived: Vec::new(),
+                base_ref: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -219,6 +220,7 @@ mod tests {
                 setup: Some("npm install".to_string()),
                 archive: None,
                 archived: Vec::new(),
+                base_ref: None,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -415,5 +417,67 @@ mod tests {
 
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, original);
+    }
+
+    // --- issue #54: per-repo base ref for NEW-branch worktrees --------------
+    //
+    // TDD RED: `Repository.base_ref: Option<String>` is additive and
+    // back-compatible. A repos entry written before #54 has no `base_ref` key and
+    // must load as `None` (serde default); an unset `base_ref` is omitted on save
+    // (skip_serializing_if), and a populated one must round-trip.
+
+    #[test]
+    fn legacy_repo_entry_without_base_ref_loads_as_none() {
+        let cfg: Config = toml::from_str(
+            "agent_cmd = \"claude\"\n[[repos]]\nname = \"demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.repos[0].base_ref, None);
+    }
+
+    #[test]
+    fn base_ref_round_trips_and_none_is_omitted_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // An unset base_ref must be omitted from the serialized output.
+        let none_path = dir.path().join("none.toml");
+        Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                base_ref: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_to(&none_path)
+        .unwrap();
+        let none_serialized = std::fs::read_to_string(&none_path).unwrap();
+        assert!(
+            !none_serialized.contains("base_ref"),
+            "a None base_ref must be omitted via skip_serializing_if, got:\n{none_serialized}"
+        );
+
+        // A populated base_ref must serialize and round-trip exactly.
+        let populated_path = dir.path().join("populated.toml");
+        let original = Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                base_ref: Some("origin/main".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        original.save_to(&populated_path).unwrap();
+        let serialized = std::fs::read_to_string(&populated_path).unwrap();
+        assert!(
+            serialized.contains("base_ref") && serialized.contains("origin/main"),
+            "a populated base_ref must be serialized, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&populated_path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.repos[0].base_ref.as_deref(), Some("origin/main"));
     }
 }
