@@ -153,6 +153,39 @@ pub fn add_existing_branch(repo_path: &Path, new_path: &Path, branch: &str) -> a
     Ok(())
 }
 
+/// argv for renaming a branch in place: `git branch -m <old> <new>`. Both names
+/// are discrete argv elements — the new name is the user's text passed verbatim
+/// (never slugified, never interpolated into a shell string).
+pub fn rename_branch_argv(old: &str, new: &str) -> Vec<String> {
+    vec![
+        "branch".to_string(),
+        "-m".to_string(),
+        old.to_string(),
+        new.to_string(),
+    ]
+}
+
+/// Renames the branch `old` to `new` in place via `git -C <repo> branch -m`.
+/// `git branch -m` only renames the ref, so the worktree directory does NOT move
+/// and path-keyed state stays valid. A non-zero exit (e.g. a name collision)
+/// surfaces as an error rather than panicking.
+pub fn rename_branch(repo_path: &Path, old: &str, new: &str) -> anyhow::Result<()> {
+    let repo = repo_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", &repo])
+        .args(rename_branch_argv(old, new))
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git branch -m failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 pub fn remove(repo_path: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     let repo = repo_path.to_string_lossy();
     let wt = worktree_path.to_string_lossy();

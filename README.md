@@ -104,6 +104,7 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `D` | Unregister the selected repository (config only; nothing on disk is deleted) |
 | `n` | Add a worktree |
 | `d` | Remove the selected worktree |
+| `b` | Rename the selected worktree's branch |
 | `R` | Restart the selected worktree's agent (kills its tmux session; a fresh agent respawns) |
 | `r` | Refresh worktrees |
 | `g` | Jump to the next agent needing attention |

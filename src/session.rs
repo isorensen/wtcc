@@ -23,6 +23,18 @@ pub enum ActivityState {
 /// How recently a session must have produced output to count as `Working`.
 pub const WORKING_WINDOW: Duration = Duration::from_millis(1000);
 
+/// argv for re-keying a tmux session in place: `tmux rename-session -t <old>
+/// <new>`. Both names are already-slugified `wtcc-<slug>` keys, passed as
+/// discrete argv elements — never via a shell.
+pub fn rename_session_argv(old: &str, new: &str) -> Vec<String> {
+    vec![
+        "rename-session".to_string(),
+        "-t".to_string(),
+        old.to_string(),
+        new.to_string(),
+    ]
+}
+
 /// Classifies a session's activity from how long it has been idle. `None` input
 /// means there is no session. Pure and total: the sole place the threshold is
 /// applied, so the heuristic is unit-testable without a PTY.
@@ -284,6 +296,24 @@ impl SessionManager {
             .status();
     }
 
+    /// Re-keys the live session `old` to `new` WITHOUT killing the agent: the
+    /// local `Session` is moved under the new map key and the underlying tmux
+    /// session is renamed in place (argv-only `tmux rename-session`). A missing
+    /// local session is a no-op (no entry is fabricated under `new`); a missing
+    /// tmux session reports an error that is intentionally ignored. Only the
+    /// named session is touched, never any other worktree's.
+    pub fn rename(&mut self, old: &str, new: &str) {
+        let Some(session) = self.sessions.remove(old) else {
+            return;
+        };
+        self.sessions.insert(new.to_string(), session);
+        let _ = std::process::Command::new("tmux")
+            .args(rename_session_argv(old, new))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     /// Activity state for the session named `name`: `None` when no such session
     /// exists, otherwise classified from its output cadence. Cheap — just reads
     /// an `Instant` under a lock.
@@ -455,6 +485,49 @@ mod tests {
             SessionManager::session_name("Feature/Foo Bar"),
             "wtcc-feature-foo-bar"
         );
+    }
+
+    // --- issue #51: re-key a session WITHOUT killing the live agent ----------
+    //
+    // TDD RED: a branch rename must re-key the agent's tmux session in place
+    // (`tmux rename-session`) so the live agent stays attached under the new
+    // `wtcc-<slug>` key — never killed and respawned. The in-memory map re-key is
+    // the unit-tested part; the tmux spawn stays thin and is exercised via
+    // `rename_session_argv` in the integration suite.
+
+    #[test]
+    fn rename_rekeys_session_preserving_entry_and_leaving_others() {
+        let mut mgr = SessionManager::new();
+        let mut a = CommandBuilder::new("printf");
+        a.args(["a"]);
+        let mut b = CommandBuilder::new("printf");
+        b.args(["b"]);
+        mgr.insert_spawned("wtcc-old", a, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        mgr.insert_spawned("wtcc-other", b, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+
+        mgr.rename("wtcc-old", "wtcc-new");
+
+        assert!(mgr.get("wtcc-old").is_none(), "old key must be removed");
+        assert!(
+            mgr.get("wtcc-new").is_some(),
+            "the live session entry must be preserved under the new key, not killed"
+        );
+        assert!(
+            mgr.get("wtcc-other").is_some(),
+            "renaming one session must leave every other session intact"
+        );
+    }
+
+    #[test]
+    fn rename_unknown_session_is_noop() {
+        let mut mgr = SessionManager::new();
+        // No local session and tmux may report no session — must not panic and
+        // must not fabricate an entry under the new key.
+        mgr.rename("wtcc-missing", "wtcc-new");
+        assert!(mgr.get("wtcc-missing").is_none());
+        assert!(mgr.get("wtcc-new").is_none());
     }
 
     // --- issue #47: attention edge detection --------------------------------

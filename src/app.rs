@@ -96,6 +96,7 @@ pub fn spawn_setup(command: &str, cwd: &Path) {
 pub enum Prompt {
     AddWorktree,
     AddRepo,
+    RenameBranch,
 }
 
 /// What the user is being asked to confirm while a confirm overlay is open.
@@ -471,6 +472,55 @@ impl App {
                 }
             }
             Err(e) => self.status = Some(format!("add failed: {e}")),
+        }
+    }
+
+    /// Renames the selected worktree's branch to `new` and RE-KEYS its agent's
+    /// tmux session in place so the live agent stays attached under the new
+    /// `wtcc-<slug>` key (never killed). `git branch -m` does not move the
+    /// worktree directory, so path-keyed state (vcs/attention) stays valid and is
+    /// left untouched. `new` is passed to git verbatim; only the DERIVED tmux
+    /// session key is slugified. Guards (empty name, no/detached/bare worktree,
+    /// name collision) and any git failure land in `status` — never panics.
+    pub fn rename_branch(&mut self, new: &str) {
+        let new = new.trim();
+        if new.is_empty() {
+            self.status = Some("branch name cannot be empty".to_string());
+            return;
+        }
+        let Some(wt) = self.current_worktree() else {
+            self.status = Some("no worktree selected".to_string());
+            return;
+        };
+        if wt.is_detached {
+            self.status = Some("cannot rename a detached worktree".to_string());
+            return;
+        }
+        if wt.is_bare {
+            self.status = Some("cannot rename a bare worktree".to_string());
+            return;
+        }
+        let old_branch = wt.branch.clone();
+        let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
+            self.status = Some("no repo selected".to_string());
+            return;
+        };
+        if worktree::branch_exists(&repo, new) {
+            self.status = Some(format!("branch already exists: {new}"));
+            return;
+        }
+        match worktree::rename_branch(&repo, &old_branch, new) {
+            Ok(()) => {
+                let old_name = SessionManager::session_name(&old_branch);
+                let new_name = SessionManager::session_name(new);
+                self.session_manager.rename(&old_name, &new_name);
+                if self.active_session.as_deref() == Some(old_name.as_str()) {
+                    self.active_session = Some(new_name);
+                }
+                self.refresh_worktrees();
+                self.status = Some(format!("renamed branch to {new}"));
+            }
+            Err(e) => self.status = Some(format!("rename failed: {e}")),
         }
     }
 
@@ -1211,6 +1261,168 @@ mod tests {
     fn poll_attention_is_empty_without_sessions() {
         let mut app = app_with_fake_worktrees();
         assert!(app.poll_attention().is_empty());
+    }
+
+    // --- issue #51: rename branch + re-key the live agent session -----------
+    //
+    // TDD RED: `App::rename_branch(new)` takes `old` from the selected worktree,
+    // renames the branch via git (argv-only `git branch -m`), then RE-KEYS the
+    // agent's `wtcc-<slug>` tmux session in place — the live agent stays attached
+    // under the new key (never killed) — updates `active_session` if it matched,
+    // and refreshes the worktree list. The worktree DIRECTORY does not move, so
+    // path-keyed state stays valid and is left untouched.
+
+    fn init_git_repo(repo: &Path) {
+        let init = std::process::Command::new("git")
+            .arg("init")
+            .arg(repo)
+            .output()
+            .expect("git must be installed");
+        assert!(init.status.success(), "git init failed");
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git must be installed");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "wtcc test"]);
+        run(&["commit", "--allow-empty", "-m", "init"]);
+    }
+
+    fn app_for_repo(repo: PathBuf) -> App {
+        let mut app = App {
+            config: Config {
+                repos: vec![Repository {
+                    name: "demo".to_string(),
+                    path: repo,
+                    setup: None,
+                    archive: None,
+                }],
+                agent_cmd: "claude".to_string(),
+                notify: true,
+                merge_strategy: crate::pr::MergeStrategy::default(),
+            },
+            selected_repo: Some(0),
+            worktrees: Vec::new(),
+            selected_worktree: None,
+            focus: Focus::Sidebar,
+            theme: Theme::default(),
+            overlay: Overlay::None,
+            status: None,
+            should_quit: false,
+            session_manager: SessionManager::new(),
+            active_session: None,
+            attention: AttentionTracker::default(),
+            config_path: None,
+            vcs_status: HashMap::new(),
+            vcs_provider: Arc::new(GitGhProvider),
+            vcs_rx: None,
+        };
+        app.refresh_worktrees();
+        app
+    }
+
+    #[test]
+    fn rename_branch_rekeys_live_session_updates_active_and_branch_field() {
+        use portable_pty::CommandBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_git_repo(&repo);
+        let mut app = app_for_repo(repo);
+
+        let old_branch = app.current_worktree().unwrap().branch.clone();
+        let old_name = SessionManager::session_name(&old_branch);
+        let other_name = SessionManager::session_name("other-wt");
+        let mut s = CommandBuilder::new("printf");
+        s.args(["x"]);
+        let mut o = CommandBuilder::new("printf");
+        o.args(["y"]);
+        app.session_manager
+            .insert_spawned(&old_name, s, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.session_manager
+            .insert_spawned(&other_name, o, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        app.active_session = Some(old_name.clone());
+
+        app.rename_branch("renamed-branch");
+
+        let new_name = SessionManager::session_name("renamed-branch");
+        assert!(
+            app.session_manager.get(&old_name).is_none(),
+            "the old session key must be gone"
+        );
+        assert!(
+            app.session_manager.get(&new_name).is_some(),
+            "the live agent must be RE-KEYED under the new slug, not killed"
+        );
+        assert!(
+            app.session_manager.get(&other_name).is_some(),
+            "renaming one worktree must leave every other session intact"
+        );
+        assert_eq!(
+            app.active_session.as_deref(),
+            Some(new_name.as_str()),
+            "active_session must follow the rename so the pane stays attached"
+        );
+        assert!(
+            app.worktrees.iter().any(|w| w.branch == "renamed-branch"),
+            "the sidebar must show the new branch after refresh"
+        );
+        assert!(
+            !app.worktrees.iter().any(|w| w.branch == old_branch),
+            "the old branch must be gone after the rename"
+        );
+    }
+
+    #[test]
+    fn rename_branch_to_existing_name_is_refused_and_keeps_the_session() {
+        use portable_pty::CommandBuilder;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_git_repo(&repo);
+        let collide = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["branch", "taken"])
+            .output()
+            .unwrap();
+        assert!(collide.status.success());
+        let mut app = app_for_repo(repo);
+
+        let old_branch = app.current_worktree().unwrap().branch.clone();
+        let old_name = SessionManager::session_name(&old_branch);
+        let mut s = CommandBuilder::new("printf");
+        s.args(["x"]);
+        app.session_manager
+            .insert_spawned(&old_name, s, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+
+        app.rename_branch("taken");
+
+        assert!(
+            app.session_manager.get(&old_name).is_some(),
+            "a refused rename must not touch the agent session"
+        );
+        let status = app.status.clone().unwrap_or_default().to_lowercase();
+        assert!(
+            status.contains("exists"),
+            "expected an 'already exists' status, got {status:?}"
+        );
+        assert!(
+            app.worktrees.iter().any(|w| w.branch == old_branch),
+            "the branch must be unchanged after a refused rename"
+        );
     }
 
     // --- issue #49: bounded archive runner ----------------------------------
