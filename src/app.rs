@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 
 use crate::config::Config;
-use crate::session::{ActivityState, SessionManager};
+use crate::session::{ActivityState, AttentionTracker, SessionManager};
 use crate::vcs::{GitGhProvider, VcsProvider, VcsStatus};
 use crate::worktree::{self, Worktree};
 
@@ -59,6 +59,9 @@ pub struct App {
     pub should_quit: bool,
     pub session_manager: SessionManager,
     pub active_session: Option<String>,
+    /// Edge-triggered tracker that flags agents which have gone quiet and need
+    /// the user's input. Polled once per frame from the run loop.
+    pub attention: AttentionTracker,
     /// When set, config is persisted here instead of the default XDG path.
     /// Used by tests to redirect writes into a temp directory.
     pub config_path: Option<PathBuf>,
@@ -123,6 +126,7 @@ impl App {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            attention: AttentionTracker::default(),
             config_path: None,
             vcs_status: HashMap::new(),
             vcs_provider,
@@ -282,6 +286,51 @@ impl App {
         {
             Ok(_) => self.active_session = Some(name),
             Err(e) => self.status = Some(format!("agent spawn failed: {e}")),
+        }
+    }
+
+    /// Polls the attention tracker with a fresh idle snapshot, suppressing the
+    /// active session. Returns the branch labels that newly need attention this
+    /// frame, for the run loop to surface as desktop notifications.
+    pub fn poll_attention(&mut self) -> Vec<String> {
+        let snapshot = self.session_manager.idle_durations();
+        let active = self.active_session.clone();
+        let fired = self.attention.poll(&snapshot, active.as_deref());
+        fired
+            .iter()
+            .filter_map(|name| {
+                self.worktrees
+                    .iter()
+                    .find(|w| &SessionManager::session_name(&w.branch) == name)
+                    .map(|w| w.branch.clone())
+            })
+            .collect()
+    }
+
+    /// Whether the agent for `branch` is currently flagged for attention.
+    pub fn attention_for(&self, branch: &str) -> bool {
+        self.attention.needs(&SessionManager::session_name(branch))
+    }
+
+    /// How many agents are currently flagged for attention.
+    pub fn attention_count(&self) -> usize {
+        self.attention.count()
+    }
+
+    /// Moves the selection to the next worktree (cyclically, after the current
+    /// one) whose agent is flagged for attention. No-op when none are flagged.
+    pub fn jump_to_attention(&mut self) {
+        let n = self.worktrees.len();
+        if n == 0 {
+            return;
+        }
+        let start = self.selected_worktree.unwrap_or(0);
+        for offset in 1..=n {
+            let i = (start + offset) % n;
+            if self.attention_for(&self.worktrees[i].branch) {
+                self.selected_worktree = Some(i);
+                return;
+            }
         }
     }
 
@@ -481,6 +530,7 @@ mod tests {
                 path: PathBuf::from("/tmp/does-not-exist-demo"),
             }],
             agent_cmd: "claude".to_string(),
+            notify: true,
         }
     }
 
@@ -512,6 +562,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            attention: AttentionTracker::default(),
             config_path: None,
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
@@ -608,6 +659,7 @@ mod tests {
                     },
                 ],
                 agent_cmd: "claude".to_string(),
+                notify: true,
             },
             selected_repo: Some(1),
             worktrees: Vec::new(),
@@ -618,6 +670,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            attention: AttentionTracker::default(),
             config_path: Some(config_path),
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
@@ -807,5 +860,51 @@ mod tests {
         for status in app.vcs_status.values() {
             assert!(!status.dirty, "expected provider B (dirty=false) in cache");
         }
+    }
+
+    // --- issue #47: attention routing ---------------------------------------
+
+    /// Drives the tracker through a Busy->Quiet edge for `branch`'s session so
+    /// it becomes flagged, without needing a real PTY.
+    fn flag_branch(app: &mut App, branch: &str) {
+        let name = SessionManager::session_name(branch);
+        let busy = [(name.clone(), std::time::Duration::ZERO)];
+        let quiet = [(name, crate::session::ATTENTION_QUIET)];
+        app.attention.poll(&busy, None);
+        app.attention.poll(&quiet, None);
+    }
+
+    #[test]
+    fn jump_to_attention_advances_to_flagged_worktree() {
+        let mut app = app_with_fake_worktrees(); // main(0), feat(1), selected 0
+        flag_branch(&mut app, "feat");
+        app.jump_to_attention();
+        assert_eq!(app.selected_worktree, Some(1));
+    }
+
+    #[test]
+    fn jump_to_attention_is_noop_when_none_flagged() {
+        let mut app = app_with_fake_worktrees();
+        app.jump_to_attention();
+        assert_eq!(app.selected_worktree, Some(0));
+    }
+
+    #[test]
+    fn attention_count_and_attention_for_reflect_the_flagged_set() {
+        let mut app = app_with_fake_worktrees();
+        assert_eq!(app.attention_count(), 0);
+        assert!(!app.attention_for("feat"));
+
+        flag_branch(&mut app, "feat");
+
+        assert_eq!(app.attention_count(), 1);
+        assert!(app.attention_for("feat"));
+        assert!(!app.attention_for("main"));
+    }
+
+    #[test]
+    fn poll_attention_is_empty_without_sessions() {
+        let mut app = app_with_fake_worktrees();
+        assert!(app.poll_attention().is_empty());
     }
 }

@@ -310,6 +310,7 @@ fn run_action(app: &mut App, action: Action) {
         Action::AddWorktree => open_add_prompt(app),
         Action::RemoveWorktree => request_remove(app),
         Action::RestartAgent => request_restart_agent(app),
+        Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),
         Action::Refresh => app.refresh_worktrees(),
         Action::Quit => app.should_quit = true,
@@ -336,6 +337,7 @@ mod tests {
                 path: PathBuf::from("/tmp/nope"),
             }],
             agent_cmd: "claude".to_string(),
+            notify: true,
         });
         app.status = None;
         app.worktrees = vec![Worktree {
@@ -537,6 +539,34 @@ mod tests {
         a.overlay = Overlay::Help;
         handle_key(&mut a, key(KeyCode::Esc));
         assert_eq!(a.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn g_jumps_to_the_next_flagged_worktree() {
+        let mut a = app();
+        a.worktrees.push(Worktree {
+            path: PathBuf::from("/repo/feat"),
+            branch: "feat".to_string(),
+            head: "def".to_string(),
+            is_bare: false,
+            is_detached: false,
+        });
+        a.selected_worktree = Some(0);
+        let feat = SessionManager::session_name("feat");
+        a.attention
+            .poll(&[(feat.clone(), std::time::Duration::ZERO)], None);
+        a.attention
+            .poll(&[(feat, crate::session::ATTENTION_QUIET)], None);
+
+        handle_key(&mut a, key(KeyCode::Char('g')));
+        assert_eq!(a.selected_worktree, Some(1));
+    }
+
+    #[test]
+    fn g_is_noop_when_nothing_flagged() {
+        let mut a = app();
+        handle_key(&mut a, key(KeyCode::Char('g')));
+        assert_eq!(a.selected_worktree, Some(0));
     }
 
     #[test]

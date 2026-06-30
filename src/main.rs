@@ -99,6 +99,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
         let (rows, cols) = ui::agent_pane_size(area);
         app.ensure_active_session(rows, cols);
         app.drain_vcs();
+        let newly_flagged = app.poll_attention();
+        if app.config.notify {
+            for label in &newly_flagged {
+                notify(label);
+            }
+        }
         if last_size != Some((rows, cols)) {
             app.session_manager.resize_all(rows, cols);
             last_size = Some((rows, cols));
@@ -137,6 +143,24 @@ fn restore_terminal() -> anyhow::Result<()> {
         crossterm::cursor::Show
     )?;
     Ok(())
+}
+
+/// The notification body shown when an agent for `label` goes quiet. Pure so it
+/// is unit-testable without spawning a process.
+fn notify_body(label: &str) -> String {
+    format!("Agent for {label} needs your input")
+}
+
+/// Best-effort desktop notification via `notify-send`. Spawned with an explicit
+/// argv (never a shell). A missing `notify-send` binary fails silently — it must
+/// never panic or surface a user-facing error.
+fn notify(label: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .arg("wtcc")
+        .arg(notify_body(label))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Installs a panic hook that always restores the terminal before the default
@@ -184,5 +208,12 @@ mod tests {
             parse_args(args(&["wtcc", "--bogus"])),
             Cli::Unknown("--bogus".to_string())
         );
+    }
+
+    // --- issue #47: notification body is pure and carries the branch label ---
+
+    #[test]
+    fn notify_body_contains_the_branch_label() {
+        assert!(notify_body("feat/login").contains("feat/login"));
     }
 }

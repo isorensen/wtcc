@@ -11,10 +11,18 @@ pub struct Config {
     pub repos: Vec<Repository>,
     #[serde(default = "default_agent_cmd")]
     pub agent_cmd: String,
+    /// Whether to fire a desktop notification (via `notify-send`) when an agent
+    /// goes quiet and needs input. Defaults to `true`; absent in legacy configs.
+    #[serde(default = "default_notify")]
+    pub notify: bool,
 }
 
 fn default_agent_cmd() -> String {
     "claude".to_string()
+}
+
+fn default_notify() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -22,6 +30,7 @@ impl Default for Config {
         Config {
             repos: Vec::new(),
             agent_cmd: default_agent_cmd(),
+            notify: default_notify(),
         }
     }
 }
@@ -85,6 +94,7 @@ mod tests {
                 path: PathBuf::from("/home/user/my-repo"),
             }],
             agent_cmd: "claude".to_string(),
+            notify: true,
         };
 
         original.save_to(&path).unwrap();
@@ -100,5 +110,19 @@ mod tests {
 
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, Config::default());
+    }
+
+    // --- issue #47: notify defaults to true, legacy configs still load -------
+
+    #[test]
+    fn default_notify_is_true() {
+        assert!(Config::default().notify);
+    }
+
+    #[test]
+    fn legacy_config_without_notify_field_deserializes_to_true() {
+        // A config.toml written before #47 has no `notify` key.
+        let cfg: Config = toml::from_str("agent_cmd = \"claude\"\n").unwrap();
+        assert!(cfg.notify);
     }
 }

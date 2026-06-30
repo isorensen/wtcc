@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 - **Roadmap** section in the README documenting the v0.6.0–v0.8.0 release plan
   (feature parity with Supacode, organized by milestone).
+- Agent **attention routing**: when a non-focused agent goes quiet (finished or
+  waiting for input), its sidebar row shows a distinct marker and the statusbar
+  shows an aggregated "N agents need input" count. Press `g` (or the palette
+  "Jump to attention" command) to jump to the next agent needing attention.
+  With `notify = true` in the config, a `notify-send` desktop notification fires
+  per newly-flagged agent (missing `notify-send` degrades silently) (#47).
 
 ### Changed
 - Refactored the keymap into a single data-driven source of truth (`src/keymap.rs`):

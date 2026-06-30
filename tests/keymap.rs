@@ -265,3 +265,26 @@ fn palette_and_help_share_one_label_per_action() {
         );
     }
 }
+
+// --- issue #47: jump-to-attention key + palette command ----------------------
+
+#[test]
+fn dispatch_primary_binds_g_to_jump_attention() {
+    assert_eq!(
+        keymap::dispatch(PRIMARY, key(KeyCode::Char('g'))),
+        Some(Action::JumpAttention)
+    );
+}
+
+#[test]
+fn jump_attention_is_offered_in_the_palette() {
+    assert!(Action::JumpAttention.in_palette());
+}
+
+#[test]
+fn palette_filter_includes_jump_attention() {
+    assert!(
+        palette::filter("").contains(&Action::JumpAttention),
+        "JumpAttention must appear in the palette command list"
+    );
+}

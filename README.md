@@ -106,6 +106,7 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `d` | Remove the selected worktree |
 | `R` | Restart the selected worktree's agent (kills its tmux session; a fresh agent respawns) |
 | `r` | Refresh worktrees |
+| `g` | Jump to the next agent needing attention |
 | `:` / `Ctrl-P` | Command palette |
 | `?` | Help overlay (lists all keybindings) |
 | `q` / `Ctrl-Q` | Quit |

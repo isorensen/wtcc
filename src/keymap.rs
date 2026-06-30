@@ -24,6 +24,7 @@ pub enum Action {
     AddWorktree,
     RemoveWorktree,
     RestartAgent,
+    JumpAttention,
     SwitchRepo,
     Refresh,
     Quit,
@@ -32,7 +33,7 @@ pub enum Action {
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -44,6 +45,7 @@ impl Action {
         Action::AddWorktree,
         Action::RemoveWorktree,
         Action::RestartAgent,
+        Action::JumpAttention,
         Action::SwitchRepo,
         Action::Refresh,
         Action::Quit,
@@ -65,6 +67,7 @@ impl Action {
             Action::AddWorktree => "Add worktree",
             Action::RemoveWorktree => "Remove worktree",
             Action::RestartAgent => "Restart agent",
+            Action::JumpAttention => "Jump to attention",
             Action::SwitchRepo => "Switch repo",
             Action::Refresh => "Refresh",
             Action::Quit => "Quit",
@@ -81,6 +84,7 @@ impl Action {
                 | Action::AddWorktree
                 | Action::RemoveWorktree
                 | Action::RestartAgent
+                | Action::JumpAttention
                 | Action::SwitchRepo
                 | Action::Refresh
                 | Action::Quit
@@ -174,6 +178,10 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('R'))],
         action: Action::RestartAgent,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('g'))],
+        action: Action::JumpAttention,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char('r'))],
