@@ -172,6 +172,47 @@ fn check_outcome(entry: &serde_json::Value) -> ChecksState {
     }
 }
 
+/// The single color role for a worktree's sidebar PR badge, ranked most → least
+/// severe so the renderer can pick the dominant role without ad-hoc comparisons:
+/// `Bad > Pending > Ok > Dirty > None`. The variant order encodes the ranking,
+/// so the derived `Ord` is the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BadgeSeverity {
+    None,
+    Dirty,
+    Ok,
+    Pending,
+    Bad,
+}
+
+/// Classifies a worktree's status into its dominant badge severity. PR health
+/// outranks local dirtiness (a passing PR on a dirty tree reads as `Ok`), and
+/// the worst PR state wins.
+pub fn badge_severity(status: &VcsStatus) -> BadgeSeverity {
+    let from_pr = status.pr.map_or(BadgeSeverity::None, pr_severity);
+    let from_dirty = if status.dirty {
+        BadgeSeverity::Dirty
+    } else {
+        BadgeSeverity::None
+    };
+    from_pr.max(from_dirty)
+}
+
+/// Severity contributed by the PR alone (ignoring local dirtiness). A merged PR
+/// or passing checks read as `Ok`; a closed PR or failing checks read as `Bad`.
+fn pr_severity(pr: PrStatus) -> BadgeSeverity {
+    match pr.state {
+        PrState::Closed => BadgeSeverity::Bad,
+        PrState::Merged => BadgeSeverity::Ok,
+        PrState::Open => match pr.checks {
+            ChecksState::Passing => BadgeSeverity::Ok,
+            ChecksState::Failing => BadgeSeverity::Bad,
+            ChecksState::Pending => BadgeSeverity::Pending,
+            ChecksState::None => BadgeSeverity::None,
+        },
+    }
+}
+
 /// Compact sidebar suffix for a worktree's status, e.g. `* #42 ✓`. Empty when
 /// the tree is clean and there is no PR. Kept short to fit a 34-col sidebar.
 pub fn status_badge(status: &VcsStatus) -> String {

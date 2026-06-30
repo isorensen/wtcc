@@ -1,12 +1,13 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Widget};
 
 use crate::app::{App, Focus};
 use crate::repository::Repository;
 use crate::session::ActivityState;
+use crate::theme::Theme;
 use crate::worktree::Worktree;
 
 /// One rendered row of the sidebar list, in render order. Both [`render`] and
@@ -49,33 +50,27 @@ pub fn sidebar_rows(
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let focused = app.focus == Focus::Sidebar;
-    let border_style = if focused {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+    let theme = app.theme;
 
     let block = Block::default()
         .title(" repos ")
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(super::pane_border_style(&theme, focused));
 
     let rows = sidebar_rows(&app.config.repos, &app.worktrees, app.selected_repo);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match *row {
             SidebarRow::RepoHeader(ri) => {
-                let glyph = if app.selected_repo == Some(ri) {
-                    "▸"
-                } else {
-                    " "
-                };
+                let active = app.selected_repo == Some(ri);
+                let glyph = if active { "▸" } else { " " };
+                let mut name_style = Style::default().add_modifier(Modifier::BOLD);
+                if active {
+                    name_style = name_style.fg(theme.accent);
+                }
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("{glyph} ")),
-                    Span::styled(
-                        app.config.repos[ri].name.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{glyph} "), Style::default().fg(theme.accent)),
+                    Span::styled(app.config.repos[ri].name.clone(), name_style),
                 ]))
             }
             SidebarRow::NoWorktrees => ListItem::new(Line::from("    (no worktrees)")),
@@ -106,9 +101,13 @@ fn worktree_line<'a>(
         wt.branch.clone()
     };
 
+    let theme = app.theme;
     let mut style = Style::default();
-    if selected && focused {
-        style = style.add_modifier(Modifier::REVERSED);
+    if selected {
+        style = style.fg(theme.selection);
+        if focused {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
     }
 
     let mut spans = vec![
@@ -116,24 +115,36 @@ fn worktree_line<'a>(
         activity_span(
             app.worktree_activity(&wt.branch),
             app.attention_for(&wt.branch),
+            theme,
         ),
         Span::raw(format!("{glyph} ")),
         Span::styled(label, style),
     ];
 
-    if let Some(badge) = app
-        .vcs_status
-        .get(&wt.path)
-        .map(crate::vcs::status_badge)
-        .filter(|b| !b.is_empty())
-    {
-        spans.push(Span::styled(
-            format!(" {badge}"),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+    if let Some(status) = app.vcs_status.get(&wt.path) {
+        let badge = crate::vcs::status_badge(status);
+        if !badge.is_empty() {
+            let color = severity_color(&theme, crate::vcs::badge_severity(status));
+            spans.push(Span::styled(
+                format!(" {badge}"),
+                Style::default().fg(color),
+            ));
+        }
     }
 
     Line::from(spans)
+}
+
+/// Maps a PR-badge severity to its theme color.
+fn severity_color(theme: &crate::theme::Theme, severity: crate::vcs::BadgeSeverity) -> Color {
+    use crate::vcs::BadgeSeverity;
+    match severity {
+        BadgeSeverity::Bad => theme.pr_bad,
+        BadgeSeverity::Pending => theme.pr_pending,
+        BadgeSeverity::Ok => theme.pr_ok,
+        BadgeSeverity::Dirty => theme.dirty,
+        BadgeSeverity::None => theme.hint,
+    }
 }
 
 /// A single-column glyph for the agent's activity, occupying a fixed width so
@@ -144,13 +155,28 @@ fn worktree_line<'a>(
 /// When `attention` is set the cell becomes a bold attention marker (`◈`),
 /// distinct from every plain glyph, reusing the same fixed-width column so the
 /// layout never shifts.
-fn activity_span<'a>(state: ActivityState, attention: bool) -> Span<'a> {
+fn activity_span<'a>(state: ActivityState, attention: bool, theme: Theme) -> Span<'a> {
     if attention {
-        return Span::styled("◈", Style::default().add_modifier(Modifier::BOLD));
+        return Span::styled(
+            "◈",
+            Style::default()
+                .fg(theme.attention)
+                .add_modifier(Modifier::BOLD),
+        );
     }
     match state {
-        ActivityState::Working => Span::styled("◆", Style::default().add_modifier(Modifier::BOLD)),
-        ActivityState::Idle => Span::styled("◇", Style::default().add_modifier(Modifier::DIM)),
+        ActivityState::Working => Span::styled(
+            "◆",
+            Style::default()
+                .fg(theme.activity_working)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ActivityState::Idle => Span::styled(
+            "◇",
+            Style::default()
+                .fg(theme.activity_idle)
+                .add_modifier(Modifier::DIM),
+        ),
         ActivityState::None => Span::raw(" "),
     }
 }
@@ -183,9 +209,10 @@ mod tests {
             ActivityState::Idle,
             ActivityState::None,
         ] {
+            let theme = Theme::default();
             assert_ne!(
-                glyph(activity_span(state, false)),
-                glyph(activity_span(state, true)),
+                glyph(activity_span(state, false, theme)),
+                glyph(activity_span(state, true, theme)),
                 "attention marker must differ from the plain {state:?} glyph"
             );
         }
@@ -194,14 +221,18 @@ mod tests {
     /// Without the flag, the existing glyphs are unchanged (no layout drift).
     #[test]
     fn activity_span_plain_glyphs_are_unchanged() {
-        assert_eq!(glyph(activity_span(ActivityState::Working, false)), "◆");
-        assert_eq!(glyph(activity_span(ActivityState::Idle, false)), "◇");
-        assert_eq!(glyph(activity_span(ActivityState::None, false)), " ");
+        let theme = Theme::default();
+        assert_eq!(
+            glyph(activity_span(ActivityState::Working, false, theme)),
+            "◆"
+        );
+        assert_eq!(glyph(activity_span(ActivityState::Idle, false, theme)), "◇");
+        assert_eq!(glyph(activity_span(ActivityState::None, false, theme)), " ");
     }
 
     #[test]
     fn activity_span_attention_marker_is_bold() {
-        let span = activity_span(ActivityState::Idle, true);
+        let span = activity_span(ActivityState::Idle, true, Theme::default());
         assert!(
             span.style.add_modifier.contains(Modifier::BOLD),
             "attention marker should be bold"
@@ -247,7 +278,7 @@ mod tests {
         render(&app, area, &mut buf);
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
 
-        let marker = glyph(activity_span(ActivityState::Idle, true));
+        let marker = glyph(activity_span(ActivityState::Idle, true, Theme::default()));
         assert!(
             text.contains(&marker),
             "flagged worktree should render the attention marker {marker:?}"

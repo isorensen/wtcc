@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -11,19 +11,20 @@ const SIDEBAR_HINTS: &str =
 const AGENT_HINTS: &str = "keys go to the agent  Ctrl-O back to sidebar  Ctrl-Q quit";
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
+    let theme = app.theme;
     let attention = app.attention_count();
     let line = match &app.status {
-        Some(status) => Line::styled(status.clone(), Style::default().fg(Color::Yellow)),
+        Some(status) => Line::styled(status.clone(), Style::default().fg(theme.status)),
         None if attention > 0 => Line::styled(
             format!("{attention} agent(s) need input — press g to jump"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.attention),
         ),
         None => {
             let hints = match app.focus {
                 Focus::Sidebar => SIDEBAR_HINTS,
                 Focus::Agent => AGENT_HINTS,
             };
-            Line::styled(hints, Style::default().fg(Color::DarkGray))
+            Line::styled(hints, Style::default().fg(theme.hint))
         }
     };
     Paragraph::new(line).render(area, buf);

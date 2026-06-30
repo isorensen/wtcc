@@ -18,6 +18,10 @@ All notable changes to this project are documented here. The format is based on
 - Mouse **wheel scroll** over the sidebar moves the selection (up/down), regardless
   of which pane has focus — consistent with clicking a sidebar row. Scrolling over
   the agent pane is a no-op (#45).
+- A single **`Theme`** (`src/theme.rs`, default-only) centralizes all UI colors:
+  the focused pane now has a distinct colored border, and the sidebar/statusbar/PR
+  badges have a clearer visual hierarchy. PR badge color reflects a derived
+  severity (failing/closed → red, pending → yellow, ok → green, dirty → yellow) (#44).
 
 ### Changed
 - Refactored the keymap into a single data-driven source of truth (`src/keymap.rs`):

@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use crate::config::Config;
 use crate::session::{ActivityState, AttentionTracker, SessionManager};
+use crate::theme::Theme;
 use crate::vcs::{GitGhProvider, VcsProvider, VcsStatus};
 use crate::worktree::{self, Worktree};
 
@@ -54,6 +55,8 @@ pub struct App {
     pub worktrees: Vec<Worktree>,
     pub selected_worktree: Option<usize>,
     pub focus: Focus,
+    /// UI colors, resolved once at startup. Default-only; no user config.
+    pub theme: Theme,
     pub overlay: Overlay,
     pub status: Option<String>,
     pub should_quit: bool,
@@ -121,6 +124,7 @@ impl App {
             worktrees: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
             should_quit: false,
@@ -572,6 +576,7 @@ mod tests {
             ],
             selected_worktree: Some(0),
             focus: Focus::Sidebar,
+            theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
             should_quit: false,
@@ -737,6 +742,7 @@ mod tests {
             worktrees: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            theme: Theme::default(),
             overlay: Overlay::None,
             status: None,
             should_quit: false,
