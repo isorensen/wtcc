@@ -6,7 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.8.4] - 2026-07-01
+## [0.8.5] - 2026-07-01
+
+### Fixed
+- **Agent/tmux sessions no longer collide across repos**: session names, per-worktree
+  tab layouts, and agent presets were keyed by branch name alone, so two repos
+  expanded at once (0.8.2) with a same-named branch (e.g. both `main`) shared one
+  live agent session and one tab layout — restarting or removing one could reach into
+  the other. Identity is now a composite `<repo>-<branch>-<hash>` key (the hash is a
+  stable digest of the repo path, so even same-named or hyphen-named repos like
+  `advfit` and `advfit-ui` never collide). (#89)
+
+### Notes
+- **Migration:** on upgrade, a running agent's tmux session (`wtcc-<branch>`) is
+  orphaned once — reattach spawns a fresh session under the new key; the old one can
+  be cleaned up with `tmux kill-session`. Any per-worktree agent presets set before
+  this release (keyed by bare branch name) stop matching and fall back to the default
+  agent; re-select them with `Shift+A` if needed. Most setups have none.
 
 ### Added
 - **Agent surface falls back to a shell when the agent exits**: when the agent

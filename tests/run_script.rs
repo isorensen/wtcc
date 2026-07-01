@@ -133,14 +133,14 @@ fn s_in_sidebar_focus_opens_a_run_tab_when_configured() {
     handle_key(&mut app, key('s'));
 
     assert!(
-        has_run_tab(&app, "main"),
+        has_run_tab(&app, &app.worktree_key(0, "main")),
         "s in sidebar focus opens a Run tab for the current worktree"
     );
-    let layout = app.layouts.get("main").unwrap();
+    let layout = app.layouts.get(&app.worktree_key(0, "main")).unwrap();
     let run_tab = layout.tabs.iter().find(|t| t.kind == TabKind::Run).unwrap();
     assert_eq!(
         run_tab.session,
-        run_session_name("main"),
+        run_session_name(&app.worktree_key(0, "main")),
         "the Run tab is backed by the wtcc-run-<slug> session"
     );
 }
@@ -154,7 +154,7 @@ fn s_in_sidebar_focus_with_no_run_sets_status_and_opens_no_tab() {
     handle_key(&mut app, key('s'));
 
     assert!(
-        !has_run_tab(&app, "main"),
+        !has_run_tab(&app, &app.worktree_key(0, "main")),
         "no run configured -> no Run tab is opened"
     );
     assert!(
@@ -174,7 +174,7 @@ fn s_in_agent_focus_does_not_open_a_run_tab() {
     handle_key(&mut app, key('s'));
 
     assert!(
-        !has_run_tab(&app, "main"),
+        !has_run_tab(&app, &app.worktree_key(0, "main")),
         "s is forwarded to the PTY in agent focus and must not open a run tab"
     );
 }

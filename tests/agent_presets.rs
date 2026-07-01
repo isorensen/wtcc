@@ -179,7 +179,7 @@ fn submitting_the_switch_agent_input_records_persists_and_restarts() {
     let mut app = app_with_presets();
     app.config_path = Some(cfg_path.clone());
     // Pretend the worktree's agent is live so the restart can clear it.
-    app.active_session = Some(SessionManager::session_name("main"));
+    app.active_session = Some(SessionManager::session_name(&app.worktree_key(0, "main")));
 
     handle_key(&mut app, key('A'));
     for c in "codex".chars() {
@@ -189,9 +189,9 @@ fn submitting_the_switch_agent_input_records_persists_and_restarts() {
 
     assert_eq!(app.overlay, Overlay::None, "submit must close the overlay");
     assert_eq!(
-        app.config.worktree_agents.get("main"),
+        app.config.worktree_agents.get(&app.worktree_key(0, "main")),
         Some(&"codex".to_string()),
-        "submitting a preset name must record it for the selected worktree"
+        "submitting a preset name must record it for the selected worktree (composite key)"
     );
     assert_eq!(
         app.active_session, None,
@@ -201,7 +201,7 @@ fn submitting_the_switch_agent_input_records_persists_and_restarts() {
 
     let persisted = Config::load_from(&cfg_path).unwrap();
     assert_eq!(
-        persisted.worktree_agents.get("main"),
+        persisted.worktree_agents.get(&app.worktree_key(0, "main")),
         Some(&"codex".to_string()),
         "the choice must persist so it survives a wtcc restart"
     );
@@ -212,9 +212,10 @@ fn submitting_the_switch_agent_input_records_persists_and_restarts() {
 #[test]
 fn a_recorded_choice_resolves_to_that_presets_cmd_at_spawn_time() {
     let mut app = app_with_presets();
-    app.config.set_worktree_agent("main", "codex");
-    // `ensure_active_session` spawns with `agent_cmd_for(branch)`.
-    assert_eq!(app.config.agent_cmd_for("main"), "codex --model x");
+    let key = app.worktree_key(0, "main");
+    app.config.set_worktree_agent(&key, "codex");
+    // `ensure_active_session` spawns with `agent_cmd_for(<composite key>)`.
+    assert_eq!(app.config.agent_cmd_for(&key), "codex --model x");
     // An untouched worktree still uses the default (first) preset.
     assert_eq!(app.config.agent_cmd_for("untouched"), "claude");
 }
@@ -230,7 +231,10 @@ fn switching_to_an_unknown_preset_does_not_panic_and_falls_back() {
     app.set_worktree_agent("main", "ghost-agent");
 
     // No panic; resolution totally falls back to the first preset's cmd.
-    assert_eq!(app.config.agent_cmd_for("main"), "claude");
+    assert_eq!(
+        app.config.agent_cmd_for(&app.worktree_key(0, "main")),
+        "claude"
+    );
     assert!(app.status.is_some(), "an outcome must be reported");
 }
 
@@ -244,7 +248,9 @@ fn a_failed_save_rolls_the_choice_back_and_reports_it() {
     app.set_worktree_agent("main", "codex");
 
     assert!(
-        !app.config.worktree_agents.contains_key("main"),
+        !app.config
+            .worktree_agents
+            .contains_key(&app.worktree_key(0, "main")),
         "a failed save must roll the choice back out of the in-memory config"
     );
     let status = app.status.clone().unwrap_or_default().to_lowercase();
