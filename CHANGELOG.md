@@ -6,7 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.8.2] - 2026-07-01
+## [0.8.3] - 2026-07-01
+
+### Fixed
+- **Uppercase keybindings (`Shift+D`/`R`/`A`/`X`) now work under the Kitty keyboard
+  protocol** (e.g. ghostty). They were dead because the terminal reports
+  `Shift+<letter>` as the uppercase char *with* a redundant `SHIFT` modifier, which
+  the exact modifier match rejected — so removing a repo, restarting the agent,
+  switching agent preset, and toggling archived were all unreachable by key (the
+  command palette still worked). Chord matching now ignores `SHIFT` for character
+  keys (the shift is already encoded in the character); `Ctrl` bindings and
+  non-character keys are unaffected (#90).
 
 ### Added
 - **Expand multiple repositories at once**: each repo header in the sidebar can be
