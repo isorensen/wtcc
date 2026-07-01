@@ -28,23 +28,30 @@ pub enum SidebarRow {
 pub fn sidebar_rows(
     repos: &[Repository],
     worktrees: &[Worktree],
-    selected_repo: Option<usize>,
-    archived: &[std::path::PathBuf],
+    worktree_repo: &[usize],
+    expanded_repos: &std::collections::HashSet<std::path::PathBuf>,
     show_archived: bool,
 ) -> Vec<SidebarRow> {
     let mut rows = Vec::new();
-    for ri in 0..repos.len() {
+    for (ri, repo) in repos.iter().enumerate() {
         rows.push(SidebarRow::RepoHeader(ri));
-        if selected_repo == Some(ri) {
-            if worktrees.is_empty() {
-                rows.push(SidebarRow::NoWorktrees);
-            }
+        // Every EXPANDED repo shows its worktrees (issue #82), each carrying its
+        // REAL flat index so a click can never drift from what is drawn.
+        if expanded_repos.contains(&repo.path) {
+            let mut any = false;
             for (wi, wt) in worktrees.iter().enumerate() {
-                let is_archived = archived.iter().any(|p| p == &wt.path);
+                if worktree_repo.get(wi).copied() != Some(ri) {
+                    continue;
+                }
+                let is_archived = repo.archived.iter().any(|p| p == &wt.path);
                 if is_archived && !show_archived {
                     continue;
                 }
                 rows.push(SidebarRow::Worktree(wi));
+                any = true;
+            }
+            if !any {
+                rows.push(SidebarRow::NoWorktrees);
             }
         }
     }
@@ -73,22 +80,24 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         .borders(Borders::ALL)
         .border_style(super::pane_border_style(&theme, focused));
 
-    let archived = selected_archived(app);
     let rows = sidebar_rows(
         &app.config.repos,
         &app.worktrees,
-        app.selected_repo,
-        archived,
+        &app.worktree_repo,
+        &app.expanded_repos,
         app.show_archived,
     );
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match *row {
             SidebarRow::RepoHeader(ri) => {
-                let active = app.selected_repo == Some(ri);
-                let glyph = if active { "▸" } else { " " };
+                // Glyph reflects EXPANSION (▾ open / ▸ collapsed); color+BOLD
+                // reflect SELECTION — the two are now independent (issue #82).
+                let expanded = app.expanded_repos.contains(&app.config.repos[ri].path);
+                let selected = app.selected_repo == Some(ri);
+                let glyph = if expanded { "▾" } else { "▸" };
                 let mut name_style = Style::default().add_modifier(Modifier::BOLD);
-                if active {
+                if selected {
                     name_style = name_style.fg(theme.accent);
                 }
                 ListItem::new(Line::from(vec![
@@ -98,7 +107,13 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
             }
             SidebarRow::NoWorktrees => ListItem::new(Line::from("    (no worktrees)")),
             SidebarRow::Worktree(wi) => {
-                let is_archived = archived.iter().any(|p| p == &app.worktrees[wi].path);
+                // Archived check uses the worktree's OWN repo, not the selected one.
+                let is_archived = app
+                    .config
+                    .repos
+                    .get(app.worktree_repo[wi])
+                    .map(|r| r.archived.iter().any(|p| p == &app.worktrees[wi].path))
+                    .unwrap_or(false);
                 ListItem::new(worktree_line(
                     app,
                     focused,
@@ -324,6 +339,7 @@ mod tests {
                 is_detached: false,
             },
         ];
+        app.worktree_repo = vec![0, 0];
 
         let area = Rect::new(0, 0, 34, 8);
         let mut buf = Buffer::empty(area);
@@ -377,6 +393,7 @@ mod tests {
             is_bare: false,
             is_detached: false,
         }];
+        app.worktree_repo = vec![0];
         // Render reads only the precomputed set, never the filesystem.
         app.missing_worktrees.insert(missing_path);
 
@@ -417,6 +434,7 @@ mod tests {
             is_bare: false,
             is_detached: false,
         }];
+        app.worktree_repo = vec![0];
         app.selected_worktree = Some(0);
 
         // Give feat a real (exited) session and let it fall to Idle.
@@ -442,6 +460,114 @@ mod tests {
         assert!(
             text.contains(&marker),
             "flagged worktree should render the attention marker {marker:?}"
+        );
+    }
+
+    // --- issue #82: multiple repos expanded independently -------------------
+
+    fn repo(name: &str, path: &str) -> Repository {
+        Repository {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+            ..Default::default()
+        }
+    }
+
+    fn wt(path: &str, branch: &str) -> Worktree {
+        Worktree {
+            path: PathBuf::from(path),
+            branch: branch.to_string(),
+            head: "h".to_string(),
+            is_bare: false,
+            is_detached: false,
+        }
+    }
+
+    /// `sidebar_rows` emits worktree rows for EVERY expanded repo and none for
+    /// collapsed ones, and each row carries its REAL flat index.
+    #[test]
+    fn sidebar_rows_expands_each_expanded_repo_independently() {
+        let repos = vec![repo("a", "/tmp/a"), repo("b", "/tmp/b")];
+        let wts = vec![wt("/a/main", "am"), wt("/b/main", "bm")];
+        let tags = vec![0usize, 1usize];
+
+        // Only repo A expanded -> only A's worktree row appears.
+        let only_a: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("/tmp/a")].into_iter().collect();
+        assert_eq!(
+            sidebar_rows(&repos, &wts, &tags, &only_a, false),
+            vec![
+                SidebarRow::RepoHeader(0),
+                SidebarRow::Worktree(0),
+                SidebarRow::RepoHeader(1),
+            ]
+        );
+
+        // Both expanded -> both worktree rows, each under its own header.
+        let both: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            sidebar_rows(&repos, &wts, &tags, &both, false),
+            vec![
+                SidebarRow::RepoHeader(0),
+                SidebarRow::Worktree(0),
+                SidebarRow::RepoHeader(1),
+                SidebarRow::Worktree(1),
+            ]
+        );
+    }
+
+    /// An expanded repo with zero visible worktrees shows the `(no worktrees)`
+    /// row; a collapsed repo shows nothing under its header.
+    #[test]
+    fn sidebar_rows_marks_empty_expanded_repo_and_hides_collapsed_one() {
+        let repos = vec![repo("a", "/tmp/a"), repo("b", "/tmp/b")];
+        let wts = vec![wt("/b/main", "bm")];
+        let tags = vec![1usize]; // the only worktree belongs to repo B
+
+        let only_a: std::collections::HashSet<PathBuf> =
+            [PathBuf::from("/tmp/a")].into_iter().collect();
+        // A expanded but has no worktrees -> NoWorktrees; B collapsed -> nothing.
+        assert_eq!(
+            sidebar_rows(&repos, &wts, &tags, &only_a, false),
+            vec![
+                SidebarRow::RepoHeader(0),
+                SidebarRow::NoWorktrees,
+                SidebarRow::RepoHeader(1),
+            ]
+        );
+    }
+
+    /// The repo-header GLYPH reflects EXPANSION (`▾` open / `▸` collapsed),
+    /// independent of which repo is selected.
+    #[test]
+    fn render_repo_header_glyph_reflects_expansion() {
+        let mut app = App::new(Config {
+            repos: vec![
+                repo("aaa", "/tmp/wtcc-exp-a-none"),
+                repo("bbb", "/tmp/wtcc-exp-b-none"),
+            ],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
+        });
+        // App::new expands repo 0 only; repo 1 stays collapsed.
+        app.focus = Focus::Agent;
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            text.contains('▾'),
+            "the expanded repo header must show the open glyph, got: {text}"
+        );
+        assert!(
+            text.contains('▸'),
+            "the collapsed repo header must show the closed glyph, got: {text}"
         );
     }
 }

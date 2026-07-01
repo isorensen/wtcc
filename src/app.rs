@@ -109,10 +109,19 @@ pub enum Confirm {
     /// Restart the agent for the named branch (kill its tmux session; a fresh
     /// agent respawns on the next frame). The branch is shown in the prompt.
     RestartAgent(String),
-    /// Merge the PR for the named branch. Destructive, so confirm-gated.
-    MergePr(String),
-    /// Close the PR for the named branch. Destructive, so confirm-gated.
-    ClosePr(String),
+    /// Merge the PR for the named branch. Destructive, so confirm-gated. Carries
+    /// the worktree `path` so the executor targets the right repo (branch names
+    /// can collide across expanded repos).
+    MergePr {
+        branch: String,
+        path: PathBuf,
+    },
+    /// Close the PR for the named branch. Destructive, so confirm-gated. Carries
+    /// the worktree `path` for the same reason as `MergePr`.
+    ClosePr {
+        branch: String,
+        path: PathBuf,
+    },
 }
 
 /// The active modal overlay, if any. Only one overlay is open at a time.
@@ -135,7 +144,19 @@ pub enum Overlay {
 pub struct App {
     pub config: Config,
     pub selected_repo: Option<usize>,
+    /// Repo *paths* whose worktrees are currently expanded (shown) in the
+    /// sidebar. Keyed by path so it survives index shifts when repos are
+    /// registered/removed. Multiple repos may be expanded at once (issue #82).
+    pub expanded_repos: std::collections::HashSet<PathBuf>,
+    /// Flat list of the worktrees of ALL expanded repos, in repo order. Paired
+    /// with `worktree_repo` (same length) which tags each worktree with its repo
+    /// index. `selected_worktree` is a flat index into this vec.
     pub worktrees: Vec<Worktree>,
+    /// Repo index per worktree, parallel to `worktrees`.
+    pub worktree_repo: Vec<usize>,
+    /// Invariant: always indexes a worktree whose repo == `selected_repo`
+    /// (upheld by refresh_worktrees, handle_mouse, select_repo, toggle_repo,
+    /// jump_to_attention).
     pub selected_worktree: Option<usize>,
     pub focus: Focus,
     /// In-memory UI toggle: when `true`, archived worktrees are shown in the
@@ -212,10 +233,18 @@ impl App {
     /// error handling without spawning `git`/`gh`.
     pub(crate) fn with_provider(config: Config, vcs_provider: Arc<dyn VcsProvider>) -> App {
         let selected_repo = (!config.repos.is_empty()).then_some(0);
+        // The first repo starts expanded so the initial view matches today's
+        // behavior (its worktrees are shown on launch).
+        let mut expanded_repos = std::collections::HashSet::new();
+        if let Some(i) = selected_repo {
+            expanded_repos.insert(config.repos[i].path.clone());
+        }
         let mut app = App {
             config,
             selected_repo,
+            expanded_repos,
             worktrees: Vec::new(),
+            worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
             show_archived: false,
@@ -262,55 +291,121 @@ impl App {
             return;
         }
         self.selected_repo = Some(index);
+        // Selecting a repo expands it so its worktrees are visible; the refresh
+        // then restores selection onto one of that repo's worktrees.
+        self.expanded_repos
+            .insert(self.config.repos[index].path.clone());
         self.refresh_worktrees();
     }
 
-    /// Reloads the worktree list for the selected repo. Domain errors are
-    /// captured into `status` rather than panicking.
+    /// Expands or collapses the repo at `index` in the sidebar (issue #82).
+    /// Expanding also makes it the active (selected) repo; collapsing leaves the
+    /// selection untouched. Bounds-checked: an out-of-range index is a no-op.
+    pub fn toggle_repo(&mut self, index: usize) {
+        let Some(repo) = self.config.repos.get(index) else {
+            return;
+        };
+        let path = repo.path.clone();
+        if self.expanded_repos.contains(&path) {
+            self.expanded_repos.remove(&path);
+        } else {
+            self.expanded_repos.insert(path);
+            self.selected_repo = Some(index);
+        }
+        self.refresh_worktrees();
+    }
+
+    /// Expands/collapses the currently selected repo. No-op when none selected.
+    pub fn toggle_selected_repo(&mut self) {
+        if let Some(i) = self.selected_repo {
+            self.toggle_repo(i);
+        }
+    }
+
+    /// Rebuilds `worktrees`/`worktree_repo` from EVERY expanded repo, in repo
+    /// order, tagging each worktree with its repo index. A repo whose directory
+    /// is gone (or whose `git worktree list` errors) contributes no rows rather
+    /// than blanking the whole panel. Selection is restored by PATH, preserving
+    /// the invariant that `selected_worktree` always indexes a worktree whose
+    /// repo == `selected_repo`. Domain errors are captured rather than panicking.
     pub fn refresh_worktrees(&mut self) {
-        let Some(path) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
+        // No repo selected -> nothing to show (preserved early return).
+        if self.selected_repo.is_none() {
             self.worktrees.clear();
+            self.worktree_repo.clear();
             self.selected_worktree = None;
             self.missing_worktrees.clear();
             return;
-        };
-        // A registered repo whose ROOT was deleted would make `git -C <path>`
-        // exit 128; short-circuit with an actionable hint instead of spawning it.
-        if !path.exists() {
+        }
+        // Remember the current worktree's path so selection survives the index
+        // shifts that expanding/collapsing repos causes.
+        let prev_path = self.current_worktree().map(|w| w.path.clone());
+
+        let mut worktrees = Vec::new();
+        let mut worktree_repo = Vec::new();
+        for (ri, repo) in self.config.repos.iter().enumerate() {
+            if !self.expanded_repos.contains(&repo.path) {
+                continue;
+            }
+            // A registered repo whose ROOT was deleted would make `git -C <path>`
+            // exit 128; skip its worktrees instead of spawning it.
+            if !repo.path.exists() {
+                continue;
+            }
+            // On a list error, skip this repo's worktrees (do not blank all).
+            if let Ok(list) = worktree::list(&repo.path) {
+                for wt in list {
+                    worktrees.push(wt);
+                    worktree_repo.push(ri);
+                }
+            }
+        }
+        self.worktrees = worktrees;
+        self.worktree_repo = worktree_repo;
+
+        // Compute the missing-dir set once here so render never stats.
+        self.missing_worktrees = self
+            .worktrees
+            .iter()
+            .map(|w| w.path.clone())
+            .filter(|p| !p.exists())
+            .collect();
+
+        // Restore selection by PATH, keeping the invariant: prefer the same
+        // worktree if it still belongs to the selected repo, else that repo's
+        // first worktree, else None.
+        let selected_repo = self.selected_repo;
+        self.selected_worktree = prev_path
+            .as_ref()
+            .and_then(|p| {
+                self.worktrees
+                    .iter()
+                    .position(|w| &w.path == p)
+                    .filter(|&i| Some(self.worktree_repo[i]) == selected_repo)
+            })
+            .or_else(|| {
+                (0..self.worktrees.len()).find(|&i| Some(self.worktree_repo[i]) == selected_repo)
+            });
+
+        // The missing-dir hint fires whenever the SELECTED repo's directory is
+        // gone, regardless of whether it is expanded (its header now toggles
+        // collapse); otherwise a successful refresh clears the status line.
+        let selected_dir_missing = self
+            .selected_repo
+            .and_then(|ri| self.config.repos.get(ri))
+            .map(|r| !r.path.exists())
+            .unwrap_or(false);
+        if selected_dir_missing {
             let name = self
                 .selected_repo
                 .and_then(|i| self.config.repos.get(i))
                 .map(|r| r.name.clone())
-                .unwrap_or_else(|| path.display().to_string());
-            self.worktrees.clear();
-            self.selected_worktree = None;
-            self.missing_worktrees.clear();
-            self.vcs_status.clear();
-            self.vcs_rx = None;
+                .unwrap_or_default();
             self.status = Some(format!(
                 "repository '{name}' directory missing — press Shift+D to remove it"
             ));
-            return;
-        }
-        match worktree::list(&path) {
-            Ok(list) => {
-                self.worktrees = list;
-                self.selected_worktree = (!self.worktrees.is_empty()).then_some(0);
-                // Compute the missing-dir set once here so render never stats.
-                self.missing_worktrees = self
-                    .worktrees
-                    .iter()
-                    .map(|w| w.path.clone())
-                    .filter(|p| !p.exists())
-                    .collect();
-                self.status = None;
-            }
-            Err(e) => {
-                self.worktrees.clear();
-                self.selected_worktree = None;
-                self.missing_worktrees.clear();
-                self.status = Some(e.to_string());
-            }
+        } else {
+            self.status = None;
         }
         self.spawn_vcs_refresh();
     }
@@ -321,22 +416,30 @@ impl App {
     /// its sender's results are simply never drained. Stale cache entries (for
     /// removed worktrees) are pruned up front.
     pub fn spawn_vcs_refresh(&mut self) {
-        let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
-            self.vcs_rx = None;
-            return;
-        };
         let live: std::collections::HashSet<PathBuf> =
             self.worktrees.iter().map(|w| w.path.clone()).collect();
         self.vcs_status.retain(|k, _| live.contains(k));
 
-        let worktrees = self.worktrees.clone();
+        // Pair each worktree with its OWN repo path (worktrees now span multiple
+        // expanded repos), so status runs against the correct repo.
+        let jobs: Vec<(PathBuf, Worktree)> = self
+            .worktrees
+            .iter()
+            .enumerate()
+            .filter_map(|(i, wt)| {
+                self.worktree_repo
+                    .get(i)
+                    .and_then(|&ri| self.config.repos.get(ri))
+                    .map(|repo| (repo.path.clone(), wt.clone()))
+            })
+            .collect();
         let provider = Arc::clone(&self.vcs_provider);
         let (tx, rx) = mpsc::channel();
         self.vcs_rx = Some(rx);
 
         std::thread::spawn(move || {
-            for wt in &worktrees {
-                let status = provider.status(&repo, wt);
+            for (repo, wt) in &jobs {
+                let status = provider.status(repo, wt);
                 if tx.send((wt.path.clone(), status)).is_err() {
                     break;
                 }
@@ -371,17 +474,29 @@ impl App {
     }
 
     /// Worktree indices that keyboard navigation may land on, in display order.
-    /// When `show_archived` is true every worktree is navigable; otherwise the
-    /// selected repo's archived (soft-hidden) worktrees are skipped, using the
-    /// same `archived` set the sidebar filters on. Hidden rows are treated as
-    /// non-existent for selection.
+    /// Only the ACTIVE repo's worktrees are navigable, so j/k cycle within the
+    /// selected repo even when several repos are expanded. When `show_archived`
+    /// is false that repo's archived (soft-hidden) worktrees are skipped, keyed
+    /// off THAT worktree's own repo `archived` set. Hidden/other-repo rows are
+    /// treated as non-existent for selection.
     fn navigable_worktrees(&self) -> Vec<usize> {
-        if self.show_archived {
-            return (0..self.worktrees.len()).collect();
-        }
-        let archived = crate::ui::sidebar::selected_archived(self);
+        let Some(selected) = self.selected_repo else {
+            return Vec::new();
+        };
         (0..self.worktrees.len())
-            .filter(|&i| !archived.iter().any(|p| p == &self.worktrees[i].path))
+            .filter(|&i| self.worktree_repo.get(i).copied() == Some(selected))
+            .filter(|&i| {
+                if self.show_archived {
+                    return true;
+                }
+                let archived = self
+                    .config
+                    .repos
+                    .get(self.worktree_repo[i])
+                    .map(|r| r.archived.as_slice())
+                    .unwrap_or(&[]);
+                !archived.iter().any(|p| p == &self.worktrees[i].path)
+            })
             .collect()
     }
 
@@ -618,6 +733,11 @@ impl App {
             let i = (start + offset) % n;
             if self.attention_for(&self.worktrees[i].branch) {
                 self.selected_worktree = Some(i);
+                // The flagged worktree may live in another expanded repo;
+                // activate its repo to keep the selection invariant.
+                if let Some(&ri) = self.worktree_repo.get(i) {
+                    self.selected_repo = Some(ri);
+                }
                 return;
             }
         }
@@ -804,6 +924,9 @@ impl App {
             self.status = Some(format!("save failed: {e}"));
             return;
         }
+        // Drop the (now unregistered) repo from the expanded set so a later repo
+        // that happens to reuse the same path does not inherit its expansion.
+        self.expanded_repos.remove(&removed.path);
         let name = removed.name;
         if self.config.repos.is_empty() {
             self.selected_repo = None;
@@ -998,24 +1121,15 @@ impl App {
     /// selected worktree has no cached PR. The branch is the discrete argument
     /// every `gh` PR action takes.
     pub(crate) fn pr_target(&self) -> Result<(String, PathBuf), String> {
-        let branch = match self.current_worktree() {
-            Some(wt) => wt.branch.clone(),
+        // Resolve by the selected worktree's PATH (unique) rather than its branch
+        // name: with several repos expanded, two worktrees can share a branch
+        // name (e.g. `main`), and a name lookup would pick the wrong repo's PR.
+        let (branch, path) = match self.current_worktree() {
+            Some(wt) => (wt.branch.clone(), wt.path.clone()),
             None => return Err("no worktree selected".to_string()),
         };
-        let path = self.pr_target_for(&branch)?;
-        Ok((branch, path))
-    }
-
-    /// Resolves the worktree path to run `gh` in for `branch`'s PR, re-checking
-    /// the cached PR. Used by the confirm executors, which carry a pre-captured
-    /// branch: this re-validates against current state so a stale confirm (the PR
-    /// vanished between opening the dialog and confirming) guards out cleanly.
-    fn pr_target_for(&self, branch: &str) -> Result<PathBuf, String> {
-        let Some(wt) = self.worktrees.iter().find(|w| w.branch == branch) else {
-            return Err(format!("no worktree for {branch}"));
-        };
-        match self.vcs_status.get(&wt.path).and_then(|s| s.pr) {
-            Some(_) => Ok(wt.path.clone()),
+        match self.vcs_status.get(&path).and_then(|s| s.pr) {
+            Some(_) => Ok((branch, path)),
             None => Err(format!("no PR for {branch}")),
         }
     }
@@ -1059,16 +1173,15 @@ impl App {
     /// confirm dispatches into with its pre-captured branch. On success the
     /// cached VCS status is refreshed so the sidebar PR badge updates. Guards and
     /// any `gh` failure land in `status`.
-    pub fn pr_merge_branch(&mut self, branch: &str) {
-        let path = match self.pr_target_for(branch) {
-            Ok(path) => path,
-            Err(msg) => {
-                self.status = Some(msg);
-                return;
-            }
-        };
+    pub fn pr_merge_branch(&mut self, branch: &str, path: &Path) {
+        // Re-validate against current state: a stale confirm (the PR vanished
+        // between opening the dialog and confirming) guards out cleanly.
+        if self.vcs_status.get(path).and_then(|s| s.pr).is_none() {
+            self.status = Some(format!("no PR for {branch}"));
+            return;
+        }
         let strategy = self.config.merge_strategy;
-        let status = match crate::pr::run_gh(&crate::pr::merge_argv(branch, strategy), &path) {
+        let status = match crate::pr::run_gh(&crate::pr::merge_argv(branch, strategy), path) {
             Ok(()) => {
                 self.spawn_vcs_refresh();
                 format!("merged PR for {branch}")
@@ -1082,15 +1195,14 @@ impl App {
     /// dispatches into with its pre-captured branch. On success the cached VCS
     /// status is refreshed so the sidebar PR badge updates. Guards and any `gh`
     /// failure land in `status`.
-    pub fn pr_close_branch(&mut self, branch: &str) {
-        let path = match self.pr_target_for(branch) {
-            Ok(path) => path,
-            Err(msg) => {
-                self.status = Some(msg);
-                return;
-            }
-        };
-        let status = match crate::pr::run_gh(&crate::pr::close_argv(branch), &path) {
+    pub fn pr_close_branch(&mut self, branch: &str, path: &Path) {
+        // Re-validate against current state: a stale confirm (the PR vanished
+        // between opening the dialog and confirming) guards out cleanly.
+        if self.vcs_status.get(path).and_then(|s| s.pr).is_none() {
+            self.status = Some(format!("no PR for {branch}"));
+            return;
+        }
+        let status = match crate::pr::run_gh(&crate::pr::close_argv(branch), path) {
             Ok(()) => {
                 self.spawn_vcs_refresh();
                 format!("closed PR for {branch}")
@@ -1164,9 +1276,12 @@ mod tests {
 
     fn app_with_fake_worktrees() -> App {
         // Build without touching git, then inject worktrees directly.
+        let config = config_with_repo();
+        let expanded_repos = config.repos.iter().map(|r| r.path.clone()).collect();
         let mut app = App {
-            config: config_with_repo(),
+            config,
             selected_repo: Some(0),
+            expanded_repos,
             worktrees: vec![
                 Worktree {
                     path: PathBuf::from("/repo/main"),
@@ -1183,6 +1298,7 @@ mod tests {
                     is_detached: false,
                 },
             ],
+            worktree_repo: vec![0, 0],
             selected_worktree: Some(0),
             focus: Focus::Sidebar,
             show_archived: false,
@@ -1345,6 +1461,7 @@ mod tests {
             is_bare: false,
             is_detached: false,
         });
+        app.worktree_repo.push(0);
         app.config.repos[0].archived = vec![PathBuf::from("/repo/feat")];
         app.selected_worktree = Some(0);
         app
@@ -1425,7 +1542,7 @@ mod tests {
                 repos: vec![
                     Repository {
                         name: "repo-a".to_string(),
-                        path: repo_a,
+                        path: repo_a.clone(),
                         setup: None,
                         archive: None,
                         archived: Vec::new(),
@@ -1435,7 +1552,7 @@ mod tests {
                     },
                     Repository {
                         name: "repo-b".to_string(),
-                        path: repo_b,
+                        path: repo_b.clone(),
                         setup: None,
                         archive: None,
                         archived: Vec::new(),
@@ -1450,7 +1567,9 @@ mod tests {
                 ..Default::default()
             },
             selected_repo: Some(1),
+            expanded_repos: [repo_a, repo_b].into_iter().collect(),
             worktrees: Vec::new(),
+            worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
             show_archived: false,
@@ -1739,7 +1858,7 @@ mod tests {
             config: Config {
                 repos: vec![Repository {
                     name: "demo".to_string(),
-                    path: repo,
+                    path: repo.clone(),
                     setup: None,
                     archive: None,
                     archived: Vec::new(),
@@ -1753,7 +1872,9 @@ mod tests {
                 ..Default::default()
             },
             selected_repo: Some(0),
+            expanded_repos: [repo].into_iter().collect(),
             worktrees: Vec::new(),
+            worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
             show_archived: false,
@@ -2405,6 +2526,259 @@ mod tests {
         assert!(
             app.session_manager.get(&feat).is_some(),
             "removing one worktree must leave every other worktree's session intact"
+        );
+    }
+
+    // --- issue #82: multiple repos expanded at once -------------------------
+    //
+    // `worktrees` becomes a FLAT vec spanning every EXPANDED repo, paired with
+    // `worktree_repo` tagging each worktree's repo index. `selected_worktree`
+    // stays a flat index and always belongs to `selected_repo`. Exercised
+    // against real git temp repos via the existing `init_git_repo` seam.
+
+    fn repo_entry(name: &str, path: PathBuf) -> Repository {
+        Repository {
+            name: name.to_string(),
+            path,
+            setup: None,
+            archive: None,
+            archived: Vec::new(),
+            base_ref: None,
+            copy_on_create: Vec::new(),
+            run: None,
+        }
+    }
+
+    /// Two real git repos, both registered and EXPANDED, selection on repo 0.
+    fn app_two_expanded_repos(repo_a: PathBuf, repo_b: PathBuf) -> App {
+        let config = Config {
+            repos: vec![
+                repo_entry("a", repo_a.clone()),
+                repo_entry("b", repo_b.clone()),
+            ],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
+        };
+        let mut app = App::new(config); // expands + selects repo 0
+        app.expanded_repos.insert(repo_b); // expand repo 1 too
+        app.refresh_worktrees();
+        app
+    }
+
+    #[test]
+    fn refresh_lists_worktrees_of_all_expanded_repos_with_repo_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+
+        let app = app_two_expanded_repos(repo_a, repo_b);
+
+        assert_eq!(
+            app.worktrees.len(),
+            app.worktree_repo.len(),
+            "worktrees and worktree_repo must stay parallel"
+        );
+        let a_count = app.worktree_repo.iter().filter(|&&ri| ri == 0).count();
+        let b_count = app.worktree_repo.iter().filter(|&&ri| ri == 1).count();
+        assert_eq!(a_count, 1, "repo A's worktree must appear in the flat list");
+        assert_eq!(b_count, 1, "repo B's worktree must appear in the flat list");
+        // Selection lands on a repo-0 worktree (the invariant).
+        let sel = app.selected_worktree.expect("a worktree is selected");
+        assert_eq!(app.worktree_repo[sel], 0);
+    }
+
+    #[test]
+    fn toggle_repo_collapses_only_that_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        let mut app = app_two_expanded_repos(repo_a.clone(), repo_b.clone());
+        assert!(
+            app.worktree_repo.contains(&1),
+            "repo B's worktrees are listed while it is expanded"
+        );
+
+        app.toggle_repo(1); // collapse B only
+
+        assert!(!app.expanded_repos.contains(&repo_b), "B must collapse");
+        assert!(app.expanded_repos.contains(&repo_a), "A stays expanded");
+        assert!(
+            app.worktree_repo.iter().all(|&ri| ri == 0),
+            "only repo A's worktrees remain in the flat list"
+        );
+        assert!(!app.worktrees.is_empty(), "A's worktrees are still listed");
+    }
+
+    #[test]
+    fn navigable_worktrees_are_limited_to_the_selected_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        // Give repo A a second worktree so nav has >1 candidate within A.
+        app_for_repo(repo_a.clone()).add_worktree("feature-x");
+
+        let app = app_two_expanded_repos(repo_a, repo_b);
+
+        let nav = app.navigable_worktrees();
+        assert!(
+            nav.iter().all(|&i| app.worktree_repo[i] == 0),
+            "j/k must cycle only within the ACTIVE repo"
+        );
+        assert_eq!(
+            nav.len(),
+            app.worktree_repo.iter().filter(|&&ri| ri == 0).count(),
+            "every one of the active repo's visible worktrees is navigable"
+        );
+        assert!(
+            app.worktree_repo.contains(&1),
+            "repo B is still expanded/listed, just not navigable"
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_the_selected_worktree_within_the_selected_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        let mut app = app_two_expanded_repos(repo_a, repo_b);
+
+        let sel = app
+            .selected_worktree
+            .expect("a repo-0 worktree is selected");
+        assert_eq!(app.worktree_repo[sel], 0);
+        let sel_path = app.worktrees[sel].path.clone();
+
+        app.refresh_worktrees();
+
+        let sel2 = app.selected_worktree.expect("selection survives a refresh");
+        assert_eq!(
+            app.worktree_repo[sel2], 0,
+            "selection stays within the selected repo after a refresh"
+        );
+        assert_eq!(
+            app.worktrees[sel2].path, sel_path,
+            "selection follows the same worktree by path"
+        );
+    }
+
+    #[test]
+    fn jump_to_attention_crosses_into_the_flagged_repo() {
+        // With multiple repos expanded, jumping to a flagged worktree in ANOTHER
+        // repo must activate that repo too, or `selected_repo_path()` and
+        // `current_worktree()` would then operate on mismatched repos.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        let mut app = app_two_expanded_repos(repo_a, repo_b); // selection on repo 0
+        let b_idx = app
+            .worktree_repo
+            .iter()
+            .position(|&ri| ri == 1)
+            .expect("repo B's worktree is listed");
+        let b_branch = app.worktrees[b_idx].branch.clone();
+        flag_branch(&mut app, &b_branch);
+
+        app.jump_to_attention();
+
+        let sel = app
+            .selected_worktree
+            .expect("jumped to the flagged worktree");
+        assert_eq!(app.worktree_repo[sel], 1, "jumped into repo B");
+        assert_eq!(
+            app.selected_repo,
+            Some(1),
+            "jump-to-attention must activate the target's repo (invariant)"
+        );
+    }
+
+    #[test]
+    fn pr_target_resolves_by_path_not_by_shared_branch_name() {
+        // Two expanded repos, BOTH with a worktree on branch "main". The active
+        // repo is repo B; its "main" must be the PR target, resolved by PATH.
+        // Resolving by branch name would wrongly pick repo A's same-named one.
+        let mut app = app_with_fake_worktrees();
+        app.config
+            .repos
+            .push(repo_entry("b", PathBuf::from("/repo-b")));
+        let a_main = PathBuf::from("/repo-a/main");
+        let b_main = PathBuf::from("/repo-b/main");
+        app.worktrees = vec![
+            Worktree {
+                path: a_main.clone(),
+                branch: "main".to_string(),
+                head: "a".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+            Worktree {
+                path: b_main.clone(),
+                branch: "main".to_string(),
+                head: "b".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+        ];
+        app.worktree_repo = vec![0, 1];
+        app.selected_repo = Some(1);
+        app.selected_worktree = Some(1); // repo B's main
+        // Distinct PRs cached per path.
+        app.vcs_status.insert(
+            a_main.clone(),
+            VcsStatus {
+                dirty: false,
+                pr: Some(PrStatus {
+                    number: 1,
+                    state: PrState::Open,
+                    checks: ChecksState::Passing,
+                }),
+            },
+        );
+        app.vcs_status.insert(
+            b_main.clone(),
+            VcsStatus {
+                dirty: false,
+                pr: Some(PrStatus {
+                    number: 2,
+                    state: PrState::Open,
+                    checks: ChecksState::Passing,
+                }),
+            },
+        );
+
+        let (branch, path) = app.pr_target().expect("selected worktree has a PR");
+        assert_eq!(branch, "main");
+        assert_eq!(
+            path, b_main,
+            "PR target must be the SELECTED worktree's path, not the same-named branch in repo A"
+        );
+    }
+
+    #[test]
+    fn missing_selected_repo_dir_hints_even_when_collapsed() {
+        // Regression: the #81 missing-dir hint must fire for the SELECTED repo
+        // regardless of whether it is expanded (its header now toggles collapse).
+        let mut app = app_with_fake_worktrees();
+        app.config.repos[0].path = PathBuf::from("/does-not-exist-xyz");
+        app.expanded_repos.clear();
+        app.refresh_worktrees();
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap_or("")
+                .contains("directory missing"),
+            "a missing selected-repo dir must hint even when the repo is collapsed"
         );
     }
 }

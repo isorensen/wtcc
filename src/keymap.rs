@@ -28,6 +28,7 @@ pub enum Action {
     RunScript,
     JumpAttention,
     SwitchRepo,
+    ToggleRepo,
     SwitchAgent,
     Refresh,
     OpenPrWeb,
@@ -46,7 +47,7 @@ pub enum Action {
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -62,6 +63,7 @@ impl Action {
         Action::RunScript,
         Action::JumpAttention,
         Action::SwitchRepo,
+        Action::ToggleRepo,
         Action::SwitchAgent,
         Action::Refresh,
         Action::OpenPrWeb,
@@ -97,6 +99,7 @@ impl Action {
             Action::RunScript => "Run script",
             Action::JumpAttention => "Jump to attention",
             Action::SwitchRepo => "Switch repo",
+            Action::ToggleRepo => "Expand/collapse repo",
             Action::SwitchAgent => "Switch agent",
             Action::Refresh => "Refresh",
             Action::OpenPrWeb => "Open PR in browser",
@@ -127,6 +130,7 @@ impl Action {
                 | Action::RunScript
                 | Action::JumpAttention
                 | Action::SwitchRepo
+                | Action::ToggleRepo
                 | Action::SwitchAgent
                 | Action::Refresh
                 | Action::OpenPrWeb
@@ -248,6 +252,12 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('g'))],
         action: Action::JumpAttention,
+    },
+    // Expand/collapse the selected repo's worktrees (issue #82). Space and Enter
+    // are both free in sidebar focus.
+    Binding {
+        chords: &[Chord::key(KeyCode::Char(' ')), Chord::key(KeyCode::Enter)],
+        action: Action::ToggleRepo,
     },
     Binding {
         chords: &[Chord::key(KeyCode::Char('r'))],

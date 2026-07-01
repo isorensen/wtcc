@@ -68,6 +68,7 @@ fn app_with_presets() -> App {
         is_bare: false,
         is_detached: false,
     }];
+    app.worktree_repo = vec![0];
     app.selected_worktree = Some(0);
     app.status = None;
     app.overlay = Overlay::None;

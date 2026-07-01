@@ -73,8 +73,8 @@ pub fn hit_test(
     area: Rect,
     repos: &[Repository],
     worktrees: &[Worktree],
-    selected_repo: Option<usize>,
-    archived: &[std::path::PathBuf],
+    worktree_repo: &[usize],
+    expanded_repos: &std::collections::HashSet<std::path::PathBuf>,
     show_archived: bool,
 ) -> Hit {
     let body_height = area.height.saturating_sub(STATUS_HEIGHT);
@@ -93,8 +93,14 @@ pub fn hit_test(
         return Hit::None;
     }
     let list_index = (row - 1) as usize;
-    match sidebar::sidebar_rows(repos, worktrees, selected_repo, archived, show_archived)
-        .get(list_index)
+    match sidebar::sidebar_rows(
+        repos,
+        worktrees,
+        worktree_repo,
+        expanded_repos,
+        show_archived,
+    )
+    .get(list_index)
     {
         Some(SidebarRow::RepoHeader(ri)) => Hit::Repo(*ri),
         Some(SidebarRow::Worktree(wi)) => Hit::Worktree(*wi),
@@ -116,20 +122,27 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
         area,
         &app.config.repos,
         &app.worktrees,
-        app.selected_repo,
-        sidebar::selected_archived(app),
+        &app.worktree_repo,
+        &app.expanded_repos,
         app.show_archived,
     ) {
         Hit::None => {}
         Hit::Agent => app.focus = Focus::Agent,
+        // Clicking a repo header expands/collapses it (issue #82).
         Hit::Repo(i) => {
             app.focus = Focus::Sidebar;
-            app.select_repo(i);
+            app.toggle_repo(i);
         }
+        // Clicking a worktree selects it AND activates its repo, so the
+        // invariant (selected_worktree's repo == selected_repo) holds even when
+        // the click lands in a different expanded repo.
         Hit::Worktree(i) => {
             app.focus = Focus::Sidebar;
             if i < app.worktrees.len() {
                 app.selected_worktree = Some(i);
+                if let Some(&ri) = app.worktree_repo.get(i) {
+                    app.selected_repo = Some(ri);
+                }
             }
         }
     }
@@ -268,8 +281,8 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
                 Confirm::RemoveWorktree(path) => app.remove_worktree(&path),
                 Confirm::RemoveRepo(index) => app.remove_repository(index),
                 Confirm::RestartAgent(branch) => app.restart_agent(&branch),
-                Confirm::MergePr(branch) => app.pr_merge_branch(&branch),
-                Confirm::ClosePr(branch) => app.pr_close_branch(&branch),
+                Confirm::MergePr { branch, path } => app.pr_merge_branch(&branch, &path),
+                Confirm::ClosePr { branch, path } => app.pr_close_branch(&branch, &path),
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.overlay = Overlay::None,
@@ -352,14 +365,14 @@ fn request_restart_agent(app: &mut App) {
 
 fn request_merge_pr(app: &mut App) {
     match app.pr_target() {
-        Ok((branch, _)) => app.overlay = Overlay::Confirm(Confirm::MergePr(branch)),
+        Ok((branch, path)) => app.overlay = Overlay::Confirm(Confirm::MergePr { branch, path }),
         Err(msg) => app.status = Some(msg),
     }
 }
 
 fn request_close_pr(app: &mut App) {
     match app.pr_target() {
-        Ok((branch, _)) => app.overlay = Overlay::Confirm(Confirm::ClosePr(branch)),
+        Ok((branch, path)) => app.overlay = Overlay::Confirm(Confirm::ClosePr { branch, path }),
         Err(msg) => app.status = Some(msg),
     }
 }
@@ -401,6 +414,7 @@ fn run_action(app: &mut App, action: Action) {
         Action::RunScript => app.start_run_script(),
         Action::JumpAttention => app.jump_to_attention(),
         Action::SwitchRepo => app.cycle_repo(),
+        Action::ToggleRepo => app.toggle_selected_repo(),
         Action::SwitchAgent => open_switch_agent_prompt(app),
         Action::Refresh => app.refresh_worktrees(),
         Action::OpenPrWeb => app.pr_open_in_browser(),
@@ -455,6 +469,7 @@ mod tests {
             is_bare: false,
             is_detached: false,
         }];
+        app.worktree_repo = vec![0];
         app.selected_worktree = Some(0);
         app
     }
@@ -716,6 +731,12 @@ mod tests {
             .collect()
     }
 
+    /// The expanded set holding only `repos(n)`'s first repo (`/tmp/repo0`), so
+    /// the hit-test tests exercise the single-repo layout they were written for.
+    fn expanded0() -> std::collections::HashSet<PathBuf> {
+        [PathBuf::from("/tmp/repo0")].into_iter().collect()
+    }
+
     /// Layout for one selected repo with two worktrees. Sidebar list rows
     /// (offset from the inner top, i.e. screen row 1+):
     ///   row 1 -> RepoHeader(0)
@@ -727,7 +748,16 @@ mod tests {
 
     #[test]
     fn hit_repo_header_row() {
-        let hit = hit_test(2, 1, area(), &repos(2), &worktrees(2), Some(0), &[], false);
+        let hit = hit_test(
+            2,
+            1,
+            area(),
+            &repos(2),
+            &worktrees(2),
+            &[0, 0, 0],
+            &expanded0(),
+            false,
+        );
         assert_eq!(hit, Hit::Repo(0));
     }
 
@@ -736,11 +766,11 @@ mod tests {
         let r = repos(2);
         let w = worktrees(2);
         assert_eq!(
-            hit_test(3, 2, area(), &r, &w, Some(0), &[], false),
+            hit_test(3, 2, area(), &r, &w, &[0, 0, 0], &expanded0(), false),
             Hit::Worktree(0)
         );
         assert_eq!(
-            hit_test(3, 3, area(), &r, &w, Some(0), &[], false),
+            hit_test(3, 3, area(), &r, &w, &[0, 0, 0], &expanded0(), false),
             Hit::Worktree(1)
         );
     }
@@ -748,7 +778,16 @@ mod tests {
     #[test]
     fn second_repo_header_falls_after_first_repos_worktrees() {
         // rows: 1=Repo(0), 2=Worktree(0), 3=Worktree(1), 4=Repo(1)
-        let hit = hit_test(2, 4, area(), &repos(2), &worktrees(2), Some(0), &[], false);
+        let hit = hit_test(
+            2,
+            4,
+            area(),
+            &repos(2),
+            &worktrees(2),
+            &[0, 0, 0],
+            &expanded0(),
+            false,
+        );
         assert_eq!(hit, Hit::Repo(1));
     }
 
@@ -760,8 +799,8 @@ mod tests {
             area(),
             &repos(1),
             &worktrees(1),
-            Some(0),
-            &[],
+            &[0, 0, 0],
+            &expanded0(),
             false,
         );
         assert_eq!(hit, Hit::Agent);
@@ -770,14 +809,32 @@ mod tests {
     #[test]
     fn hit_status_line_is_none() {
         // Last body row is height-1-STATUS_HEIGHT; the status line itself is row 23.
-        let hit = hit_test(2, 23, area(), &repos(1), &worktrees(1), Some(0), &[], false);
+        let hit = hit_test(
+            2,
+            23,
+            area(),
+            &repos(1),
+            &worktrees(1),
+            &[0, 0, 0],
+            &expanded0(),
+            false,
+        );
         assert_eq!(hit, Hit::None);
     }
 
     #[test]
     fn hit_blank_sidebar_space_is_none() {
         // Below the last list row (only Repo(0)+2 worktrees occupy rows 1..=3).
-        let hit = hit_test(2, 10, area(), &repos(1), &worktrees(2), Some(0), &[], false);
+        let hit = hit_test(
+            2,
+            10,
+            area(),
+            &repos(1),
+            &worktrees(2),
+            &[0, 0, 0],
+            &expanded0(),
+            false,
+        );
         assert_eq!(hit, Hit::None);
     }
 
@@ -786,11 +843,11 @@ mod tests {
         let r = repos(1);
         let w = worktrees(1);
         assert_eq!(
-            hit_test(2, 0, area(), &r, &w, Some(0), &[], false),
+            hit_test(2, 0, area(), &r, &w, &[0, 0, 0], &expanded0(), false),
             Hit::None
         ); // top border
         assert_eq!(
-            hit_test(0, 1, area(), &r, &w, Some(0), &[], false),
+            hit_test(0, 1, area(), &r, &w, &[0, 0, 0], &expanded0(), false),
             Hit::None
         ); // left border
     }
@@ -803,8 +860,8 @@ mod tests {
             area(),
             &repos(1),
             &worktrees(1),
-            Some(0),
-            &[],
+            &[0, 0, 0],
+            &expanded0(),
             false,
         );
         assert_eq!(hit, Hit::None);
@@ -814,11 +871,91 @@ mod tests {
     fn handle_mouse_worktree_selects_and_focuses_sidebar() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         a.focus = Focus::Agent;
         handle_mouse(&mut a, 3, 3, area()); // Worktree(1)
         assert_eq!(a.selected_worktree, Some(1));
         assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    /// issue #82: a second repo can be expanded alongside the first. Clicking a
+    /// worktree that lives under a DIFFERENT expanded repo selects it AND makes
+    /// that repo active, keeping the selected_worktree/selected_repo invariant.
+    fn two_expanded_repos_app() -> App {
+        let mut a = app(); // repo 0 = /tmp/nope, expanded
+        a.config.repos.push(Repository {
+            name: "second".to_string(),
+            path: PathBuf::from("/tmp/nope2"),
+            setup: None,
+            archive: None,
+            archived: Vec::new(),
+            base_ref: None,
+            copy_on_create: Vec::new(),
+            run: None,
+        });
+        a.expanded_repos.insert(PathBuf::from("/tmp/nope2"));
+        // Flat list spanning both repos: repo 0's worktree, then repo 1's.
+        a.worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/a/main"),
+                branch: "am".to_string(),
+                head: "h".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+            Worktree {
+                path: PathBuf::from("/b/main"),
+                branch: "bm".to_string(),
+                head: "h".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+        ];
+        a.worktree_repo = vec![0, 1];
+        a.selected_repo = Some(0);
+        a.selected_worktree = Some(0);
+        a
+    }
+
+    #[test]
+    fn click_worktree_in_another_expanded_repo_activates_its_repo() {
+        let mut a = two_expanded_repos_app();
+        a.focus = Focus::Agent;
+        // Rows: 1=Header(0), 2=Worktree(0), 3=Header(1), 4=Worktree(1).
+        handle_mouse(&mut a, 3, 4, area());
+        assert_eq!(a.selected_worktree, Some(1));
+        assert_eq!(
+            a.selected_repo,
+            Some(1),
+            "clicking a worktree activates its own repo (keeps the invariant)"
+        );
+        assert_eq!(a.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn click_collapsed_repo_header_expands_it() {
+        let mut a = app(); // repo 0 expanded, one worktree
+        a.config.repos.push(Repository {
+            name: "second".to_string(),
+            path: PathBuf::from("/tmp/nope2"),
+            setup: None,
+            archive: None,
+            archived: Vec::new(),
+            base_ref: None,
+            copy_on_create: Vec::new(),
+            run: None,
+        });
+        a.worktree_repo = vec![0];
+        assert!(!a.expanded_repos.contains(&PathBuf::from("/tmp/nope2")));
+
+        // Rows: 1=Header(0), 2=Worktree(0), 3=Header(1, collapsed).
+        handle_mouse(&mut a, 2, 3, area());
+
+        assert!(
+            a.expanded_repos.contains(&PathBuf::from("/tmp/nope2")),
+            "clicking a collapsed repo header expands it"
+        );
     }
 
     #[test]
@@ -845,6 +982,7 @@ mod tests {
     fn scroll_down_in_sidebar_advances_selection() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         handle_scroll(&mut a, false, 2);
         assert_eq!(a.selected_worktree, Some(1));
@@ -854,6 +992,7 @@ mod tests {
     fn scroll_up_in_sidebar_moves_selection_back() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(1);
         handle_scroll(&mut a, true, 2);
         assert_eq!(a.selected_worktree, Some(0));
@@ -863,6 +1002,7 @@ mod tests {
     fn scroll_in_agent_region_is_noop() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         let before_focus = a.focus;
         handle_scroll(&mut a, false, SIDEBAR_WIDTH + 2);
@@ -876,6 +1016,7 @@ mod tests {
         // the selection even when the agent pane holds focus, like clicking a row.
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         a.focus = Focus::Agent;
         handle_scroll(&mut a, false, 2);
@@ -887,6 +1028,7 @@ mod tests {
     fn scroll_ignored_while_overlay_open() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         a.overlay = Overlay::Help;
         handle_scroll(&mut a, false, 2);
@@ -898,6 +1040,7 @@ mod tests {
     fn scroll_does_not_panic_on_out_of_range_col() {
         let mut a = app();
         a.worktrees = worktrees(2);
+        a.worktree_repo = vec![0, 0];
         a.selected_worktree = Some(0);
         handle_scroll(&mut a, false, 1000);
         handle_scroll(&mut a, true, 1000);

@@ -66,7 +66,9 @@ fn app_with(branches: &[&str]) -> App {
         ..Default::default()
     };
     let mut app = App::new(cfg);
-    app.worktrees = worktrees(branches);
+    let wts = worktrees(branches);
+    app.worktree_repo = vec![0; wts.len()];
+    app.worktrees = wts;
     app.selected_worktree = Some(0);
     app.status = None;
     app
@@ -251,15 +253,18 @@ fn archiving_the_selected_worktree_keeps_selection_within_bounds() {
 
 #[test]
 fn sidebar_rows_omits_archived_when_hidden_with_real_indices_preserved() {
+    let wts = worktrees(&["main", "feat", "bug"]); // real indices 0, 1, 2
     let repos = vec![Repository {
         name: "demo".to_string(),
         path: PathBuf::from("/tmp/demo"),
+        archived: vec![wts[1].path.clone()], // archive the middle one
         ..Default::default()
     }];
-    let wts = worktrees(&["main", "feat", "bug"]); // real indices 0, 1, 2
-    let archived = vec![wts[1].path.clone()]; // archive the middle one
+    let tags = vec![0usize; wts.len()];
+    let expanded: std::collections::HashSet<PathBuf> =
+        [PathBuf::from("/tmp/demo")].into_iter().collect();
 
-    let rows = sidebar_rows(&repos, &wts, Some(0), &archived, false);
+    let rows = sidebar_rows(&repos, &wts, &tags, &expanded, false);
 
     let indices: Vec<usize> = rows
         .iter()
@@ -278,15 +283,18 @@ fn sidebar_rows_omits_archived_when_hidden_with_real_indices_preserved() {
 
 #[test]
 fn sidebar_rows_includes_archived_when_shown_with_full_indices() {
+    let wts = worktrees(&["main", "feat", "bug"]);
     let repos = vec![Repository {
         name: "demo".to_string(),
         path: PathBuf::from("/tmp/demo"),
+        archived: vec![wts[1].path.clone()],
         ..Default::default()
     }];
-    let wts = worktrees(&["main", "feat", "bug"]);
-    let archived = vec![wts[1].path.clone()];
+    let tags = vec![0usize; wts.len()];
+    let expanded: std::collections::HashSet<PathBuf> =
+        [PathBuf::from("/tmp/demo")].into_iter().collect();
 
-    let rows = sidebar_rows(&repos, &wts, Some(0), &archived, true);
+    let rows = sidebar_rows(&repos, &wts, &tags, &expanded, true);
 
     let indices: Vec<usize> = rows
         .iter()
@@ -308,17 +316,20 @@ fn sidebar_rows_includes_archived_when_shown_with_full_indices() {
 fn hit_test_maps_filtered_rows_to_real_worktree_indices() {
     // Layout: row 0 = top border, row 1 = RepoHeader(0), then the worktree rows.
     let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let wts = worktrees(&["main", "feat", "bug"]);
     let repos = vec![Repository {
         name: "demo".to_string(),
         path: PathBuf::from("/tmp/demo"),
+        archived: vec![wts[1].path.clone()], // hide feat (index 1)
         ..Default::default()
     }];
-    let wts = worktrees(&["main", "feat", "bug"]);
-    let archived = vec![wts[1].path.clone()]; // hide feat (index 1)
+    let tags = vec![0usize; wts.len()];
+    let expanded: std::collections::HashSet<PathBuf> =
+        [PathBuf::from("/tmp/demo")].into_iter().collect();
 
     // Hidden: rows are RepoHeader(0), Worktree(0), Worktree(2). Screen row 3 is
     // the second worktree row, which must resolve to the REAL index 2.
-    let hit = event::hit_test(3, 3, area, &repos, &wts, Some(0), &archived, false);
+    let hit = event::hit_test(3, 3, area, &repos, &wts, &tags, &expanded, false);
     assert_eq!(
         hit,
         Hit::Worktree(2),
@@ -327,7 +338,7 @@ fn hit_test_maps_filtered_rows_to_real_worktree_indices() {
 
     // Shown: rows are RepoHeader(0), Worktree(0), Worktree(1), Worktree(2).
     // Screen row 3 is now Worktree(1).
-    let hit = event::hit_test(3, 3, area, &repos, &wts, Some(0), &archived, true);
+    let hit = event::hit_test(3, 3, area, &repos, &wts, &tags, &expanded, true);
     assert_eq!(
         hit,
         Hit::Worktree(1),
