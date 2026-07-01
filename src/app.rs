@@ -158,6 +158,10 @@ pub struct App {
     /// When set, config is persisted here instead of the default XDG path.
     /// Used by tests to redirect writes into a temp directory.
     pub config_path: Option<PathBuf>,
+    /// Worktree paths whose working directory was gone at the last refresh.
+    /// Computed once per `refresh_worktrees` so the render path never stats the
+    /// filesystem; the sidebar dims + marks these as `[missing]`.
+    pub missing_worktrees: std::collections::HashSet<PathBuf>,
     /// Cached VCS status per worktree path, filled asynchronously by a worker
     /// thread (see `spawn_vcs_refresh`). Absent entries render as "not loaded".
     pub vcs_status: HashMap<PathBuf, VcsStatus>,
@@ -224,6 +228,7 @@ impl App {
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
+            missing_worktrees: std::collections::HashSet::new(),
             vcs_status: HashMap::new(),
             vcs_provider,
             vcs_rx: None,
@@ -266,18 +271,45 @@ impl App {
         let Some(path) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
             self.worktrees.clear();
             self.selected_worktree = None;
+            self.missing_worktrees.clear();
             return;
         };
+        // A registered repo whose ROOT was deleted would make `git -C <path>`
+        // exit 128; short-circuit with an actionable hint instead of spawning it.
+        if !path.exists() {
+            let name = self
+                .selected_repo
+                .and_then(|i| self.config.repos.get(i))
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| path.display().to_string());
+            self.worktrees.clear();
+            self.selected_worktree = None;
+            self.missing_worktrees.clear();
+            self.vcs_status.clear();
+            self.vcs_rx = None;
+            self.status = Some(format!(
+                "repository '{name}' directory missing — press Shift+D to remove it"
+            ));
+            return;
+        }
         match worktree::list(&path) {
             Ok(list) => {
                 self.worktrees = list;
                 self.selected_worktree = (!self.worktrees.is_empty()).then_some(0);
+                // Compute the missing-dir set once here so render never stats.
+                self.missing_worktrees = self
+                    .worktrees
+                    .iter()
+                    .map(|w| w.path.clone())
+                    .filter(|p| !p.exists())
+                    .collect();
                 self.status = None;
             }
             Err(e) => {
                 self.worktrees.clear();
                 self.selected_worktree = None;
-                self.status = Some(format!("worktree list failed: {e}"));
+                self.missing_worktrees.clear();
+                self.status = Some(e.to_string());
             }
         }
         self.spawn_vcs_refresh();
@@ -839,7 +871,19 @@ impl App {
                     None => "removed worktree".to_string(),
                 });
             }
-            Err(e) => self.status = Some(format!("remove failed: {e}")),
+            Err(e) => {
+                // If the worktree dir is already gone, a normal remove can fail;
+                // `git worktree prune` is the safety-net that clears the entry.
+                if !path.exists() && worktree::prune(&repo).is_ok() {
+                    self.refresh_worktrees();
+                    self.status = Some(match archive_note {
+                        Some(note) => format!("removed stale worktree ({note})"),
+                        None => "removed stale worktree".to_string(),
+                    });
+                } else {
+                    self.status = Some(format!("remove failed: {e}"));
+                }
+            }
         }
     }
 
@@ -1151,12 +1195,34 @@ mod tests {
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
+            missing_worktrees: std::collections::HashSet::new(),
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,
         };
         app.selected_worktree = Some(0);
         app
+    }
+
+    /// issue #81: when the selected repo's ROOT directory no longer exists,
+    /// `refresh_worktrees` must NOT shell out to `git` (which would fail 128 with
+    /// a confusing message). Instead it empties the panel and points the user at
+    /// Shift+D to remove the dead repo entry.
+    #[test]
+    fn refresh_worktrees_reports_missing_repo_directory() {
+        // config_with_repo() points at a path that does not exist on disk.
+        let mut app = App::new(config_with_repo());
+        app.refresh_worktrees();
+
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("directory missing")),
+            "status should hint the repo directory is missing, got {:?}",
+            app.status
+        );
+        assert!(app.worktrees.is_empty(), "worktrees must be cleared");
+        assert_eq!(app.selected_worktree, None);
     }
 
     #[test]
@@ -1397,6 +1463,7 @@ mod tests {
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: Some(config_path),
+            missing_worktrees: std::collections::HashSet::new(),
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,
@@ -1699,6 +1766,7 @@ mod tests {
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
+            missing_worktrees: std::collections::HashSet::new(),
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,

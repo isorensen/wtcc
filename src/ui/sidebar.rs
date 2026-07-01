@@ -124,7 +124,7 @@ fn worktree_line<'a>(
     let selected = app.selected_worktree == Some(index);
     let glyph = if selected { "●" } else { "○" };
 
-    let label = if wt.is_bare {
+    let mut label = if wt.is_bare {
         format!("{} [bare]", short_path(&wt.path))
     } else if wt.is_detached {
         format!("{} (detached)", short_path(&wt.path))
@@ -143,6 +143,13 @@ fn worktree_line<'a>(
     // Archived rows only reach here when `show_archived` is on; dim them so they
     // read as soft-hidden without leaving the list.
     if is_archived {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    // A worktree whose directory was deleted from disk: mark it and dim it so it
+    // reads as unopenable (Shift+D / prune removes the entry). The set is computed
+    // once per refresh, so render never stats the filesystem.
+    if app.missing_worktrees.contains(&wt.path) {
+        label.push_str(" [missing]");
         style = style.add_modifier(Modifier::DIM);
     }
 
@@ -336,6 +343,51 @@ mod tests {
         assert!(
             !modifier("m").contains(Modifier::DIM),
             "a non-archived row's label must not be dimmed"
+        );
+    }
+
+    /// issue #81: a worktree whose working directory no longer exists must be
+    /// visibly marked ` [missing]` so the user knows why it cannot be opened.
+    #[test]
+    fn render_marks_a_missing_worktree_dir() {
+        let mut app = App::new(Config {
+            repos: vec![Repository {
+                name: "z".to_string(),
+                path: PathBuf::from("/tmp/wtcc-sidebar-missing-repo-none"),
+                setup: None,
+                archive: None,
+                archived: Vec::new(),
+                base_ref: None,
+                copy_on_create: Vec::new(),
+                run: None,
+            }],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
+        });
+        app.selected_repo = Some(0);
+        app.focus = Focus::Agent; // avoid selection REVERSED styling on the label
+        app.selected_worktree = None;
+        let missing_path = PathBuf::from("/tmp/wtcc-does-not-exist-worktree-none");
+        app.worktrees = vec![Worktree {
+            path: missing_path.clone(),
+            branch: "gone".to_string(),
+            head: "abc".to_string(),
+            is_bare: false,
+            is_detached: false,
+        }];
+        // Render reads only the precomputed set, never the filesystem.
+        app.missing_worktrees.insert(missing_path);
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            text.contains("[missing]"),
+            "a missing worktree dir must be marked [missing]; got: {text}"
         );
     }
 

@@ -92,6 +92,48 @@ fn add_list_remove_worktree_flow() {
     );
 }
 
+// --- issue #81: a worktree whose OWN dir was deleted (repo still present) ----
+//
+// TDD RED (real git): deleting a worktree's working directory does NOT break
+// `worktree::list` — modern git keeps listing the (now prunable) entry, so the
+// panel is not blanked. `worktree::prune` is the safety-net that drops the stale
+// admin entry when a normal `remove` is not possible.
+#[test]
+fn stale_worktree_still_lists_and_can_be_pruned() {
+    if !git_available() {
+        eprintln!("skipping: git not available on PATH");
+        return;
+    }
+
+    let repo = init_repo();
+    let repo_path = repo.path();
+
+    let wt_parent = tempfile::tempdir().expect("create sibling tempdir");
+    let stale_wt_path = wt_parent.path().join("stale-wt");
+    worktree::add_new_branch(repo_path, &stale_wt_path, "stale", None).expect("add worktree");
+
+    // Delete the worktree's working directory out from under git.
+    std::fs::remove_dir_all(&stale_wt_path).expect("remove worktree dir");
+
+    // The repo root is intact, so listing must still return BOTH the main
+    // worktree and the now-stale one (git marks it prunable, not gone).
+    let worktrees = worktree::list(repo_path).expect("list still works with a stale worktree");
+    assert_eq!(
+        worktrees.len(),
+        2,
+        "the stale worktree must still be listed: {worktrees:?}"
+    );
+    assert!(worktrees.iter().any(|w| w.branch == "stale"));
+
+    // prune drops the stale admin entry; a subsequent list no longer contains it.
+    worktree::prune(repo_path).expect("prune stale worktree");
+    let after = worktree::list(repo_path).expect("list after prune");
+    assert!(
+        !after.iter().any(|w| w.branch == "stale"),
+        "the stale worktree should be gone after prune: {after:?}"
+    );
+}
+
 #[test]
 fn add_existing_branch_checks_it_out_without_duplicate_error() {
     if !git_available() {
