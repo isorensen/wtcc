@@ -171,7 +171,17 @@ impl Chord {
     }
 
     fn matches(self, key: KeyEvent) -> bool {
-        self.code == key.code && self.mods == key.modifiers
+        // A character key already encodes Shift in its value (Shift+D => 'D'),
+        // and terminals speaking the Kitty keyboard protocol (e.g. ghostty)
+        // additionally report a redundant SHIFT modifier. Ignore SHIFT for Char
+        // codes so the uppercase bindings (D, R, A, X) fire regardless of which
+        // keyboard protocol the terminal negotiates. Non-Char keys (Tab, arrows)
+        // keep exact modifier matching.
+        let key_mods = match key.code {
+            KeyCode::Char(_) => key.modifiers.difference(KeyModifiers::SHIFT),
+            _ => key.modifiers,
+        };
+        self.code == key.code && self.mods == key_mods
     }
 
     /// Renders the chord for the help overlay, e.g. `"j"`, `"Tab"`, `"Ctrl-P"`.
@@ -345,4 +355,71 @@ pub fn help_rows(map: &[Binding]) -> Vec<(String, &'static str)> {
             (keys, b.action.label())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    // --- issue #90: uppercase bindings must fire under the Kitty keyboard -----
+    // protocol, where Shift+<letter> arrives as the uppercase char WITH a
+    // redundant SHIFT modifier. `Chord::matches` ignores SHIFT for Char codes.
+
+    #[test]
+    fn uppercase_bindings_fire_with_a_redundant_shift_modifier() {
+        // ghostty/Kitty: Shift+D => Char('D') + SHIFT. Each uppercase binding
+        // must still resolve to its action.
+        for (c, action) in [
+            ('D', Action::RemoveRepo),
+            ('R', Action::RestartAgent),
+            ('A', Action::SwitchAgent),
+            ('X', Action::ShowArchived),
+        ] {
+            assert_eq!(
+                dispatch(PRIMARY, ev(KeyCode::Char(c), KeyModifiers::SHIFT)),
+                Some(action),
+                "Shift+{c} must fire {action:?} even with a redundant SHIFT modifier"
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_bindings_still_fire_without_a_shift_modifier() {
+        // Legacy terminals report the bare uppercase char (no SHIFT); unchanged.
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('D'), KeyModifiers::NONE)),
+            Some(Action::RemoveRepo)
+        );
+    }
+
+    #[test]
+    fn lowercase_and_uppercase_stay_distinct() {
+        // Ignoring SHIFT must not collapse case: 'd' and 'D' are different keys.
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('d'), KeyModifiers::NONE)),
+            Some(Action::RemoveWorktree)
+        );
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('D'), KeyModifiers::SHIFT)),
+            Some(Action::RemoveRepo)
+        );
+    }
+
+    #[test]
+    fn ctrl_bindings_still_require_ctrl() {
+        // Ctrl+P opens the palette; a bare 'p' (with a stray SHIFT) must not.
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(Action::OpenPalette)
+        );
+        assert_ne!(
+            dispatch(PRIMARY, ev(KeyCode::Char('p'), KeyModifiers::SHIFT)),
+            Some(Action::OpenPalette)
+        );
+    }
 }
