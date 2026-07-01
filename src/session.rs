@@ -61,6 +61,30 @@ pub fn run_argv(name: &str, command: &str) -> Vec<String> {
     ]
 }
 
+/// Fixed `sh -c` script (NO user input) that runs the agent with its real argv
+/// (`$0`/`$@`) and, when it exits, replaces the process with an interactive
+/// login shell in the same PTY/cwd so the agent tab never dies as `[exited]`.
+const AGENT_FALLBACK_SCRIPT: &str = r#""$0" "$@"; exec "${SHELL:-/bin/sh}""#;
+
+/// argv for the AGENT surface: `new-session -A -s <name> sh -c <script> <agent-tokens...>`.
+/// The agent command is whitespace-split into DISCRETE trailing positional params
+/// (`$0`, `$@`), never interpolated into the script string — same argv the agent
+/// got before, now with a shell fallback on exit. tmux execs the multi-arg command
+/// vector directly (no extra word-splitting).
+pub fn agent_argv(session_name: &str, command: &str) -> Vec<String> {
+    let mut argv = vec![
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        session_name.to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        AGENT_FALLBACK_SCRIPT.to_string(),
+    ];
+    argv.extend(command.split_whitespace().map(str::to_string));
+    argv
+}
+
 /// Classifies a session's activity from how long it has been idle. `None` input
 /// means there is no session. Pure and total: the sole place the threshold is
 /// applied, so the heuristic is unit-testable without a PTY.
@@ -154,11 +178,18 @@ pub struct Session {
 }
 
 impl Session {
-    /// Spawns a named tmux/PTY surface. `command` is the agent command for an
-    /// agent tab, or `None` for a shell tab — in which case tmux launches its
-    /// default shell (the user's `$SHELL`, falling back to `/bin/sh`). When set,
-    /// it is split on whitespace and passed as argv (NOT through a shell — no
-    /// shell-metacharacter interpretation).
+    /// Spawns a named tmux/PTY surface.
+    ///
+    /// For an agent tab (`Some(command)`), tmux runs the agent under a fixed
+    /// `sh -c` wrapper ([`agent_argv`]) that execs an interactive shell in the
+    /// same PTY/cwd once the agent exits, so the surface stays usable (and `R`
+    /// can relaunch a fresh agent) instead of dying as `[exited]`. The agent
+    /// command is whitespace-split into DISCRETE trailing argv params — never
+    /// interpolated into the script, so there is no shell-metacharacter surface.
+    ///
+    /// For a shell tab (`None`), behavior is unchanged: `tmux new-session -A -s
+    /// <name>` launches its default shell (the user's `$SHELL`, falling back to
+    /// `/bin/sh`) with no wrapper.
     pub fn spawn(
         session_name: &str,
         command: Option<&str>,
@@ -167,11 +198,12 @@ impl Session {
         cols: u16,
     ) -> anyhow::Result<Session> {
         let mut cmd = CommandBuilder::new("tmux");
-        cmd.args(["new-session", "-A", "-s", session_name]);
         if let Some(command) = command {
-            for token in command.split_whitespace() {
-                cmd.arg(token);
+            for arg in agent_argv(session_name, command) {
+                cmd.arg(arg);
             }
+        } else {
+            cmd.args(["new-session", "-A", "-s", session_name]);
         }
         Self::spawn_with_command(cmd, cwd, rows, cols)
     }
@@ -869,5 +901,72 @@ mod tests {
             !argv.iter().any(|a| a == "sh" || a == "-c"),
             "no sh/-c wrapper: tmux would join it and the outer shell would word-split"
         );
+    }
+
+    // --- issue #80: agent surface drops into a shell instead of dying --------
+    //
+    // TDD RED: when the agent command exits (e.g. `/exit` in Claude Code), the
+    // AGENT tab must NOT die as a dead `[exited]` pane. tmux runs the agent under
+    // a fixed `sh -c` wrapper that execs an interactive shell in the same PTY/cwd
+    // on exit, keeping the surface usable so `R` can relaunch. The agent tokens
+    // stay DISCRETE trailing argv params (`$0`/`$@`) — never interpolated into the
+    // script string — so there is no shell-metacharacter surface. `agent_argv` is
+    // the pure seam; shell tabs (`command=None`) and run tabs are untouched.
+
+    #[test]
+    fn agent_argv_wraps_the_command_in_a_shell_fallback() {
+        let argv = agent_argv("wtcc-main", "claude --flag");
+        assert_eq!(
+            argv,
+            vec![
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "wtcc-main".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                AGENT_FALLBACK_SCRIPT.to_string(),
+                "claude".to_string(),
+                "--flag".to_string(),
+            ]
+        );
+        // The agent tokens are the DISCRETE trailing elements after the script.
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &["claude".to_string(), "--flag".to_string()],
+        );
+        // The script itself carries NO agent text — it reaches the agent only as
+        // separate positional params, never string-interpolated.
+        assert!(
+            !AGENT_FALLBACK_SCRIPT.contains("claude"),
+            "agent text must never be interpolated into the script literal"
+        );
+    }
+
+    #[test]
+    fn agent_argv_single_token_agent() {
+        let argv = agent_argv("wtcc-x", "claude");
+        // Exactly one trailing agent token after the fixed script.
+        assert_eq!(argv.last().map(String::as_str), Some("claude"));
+        let script_pos = argv
+            .iter()
+            .position(|a| a == AGENT_FALLBACK_SCRIPT)
+            .unwrap();
+        assert_eq!(
+            &argv[script_pos + 1..],
+            &["claude".to_string()],
+            "single-token agent is one trailing param after the script"
+        );
+    }
+
+    #[test]
+    fn agent_fallback_script_pins_the_exec_shell_contract() {
+        // exec replaces the process (no lingering wrapper); ${SHELL:-/bin/sh}
+        // gives the user's shell with a POSIX fallback; $0/$@ run the agent with
+        // its real argv before the fallback fires.
+        assert!(AGENT_FALLBACK_SCRIPT.contains("exec"));
+        assert!(AGENT_FALLBACK_SCRIPT.contains("${SHELL:-/bin/sh}"));
+        assert!(AGENT_FALLBACK_SCRIPT.contains("\"$0\""));
+        assert!(AGENT_FALLBACK_SCRIPT.contains("\"$@\""));
     }
 }
