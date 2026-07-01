@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-01
+
 ### Added
 - **Expand multiple repositories at once**: each repo header in the sidebar can be
   toggled open/closed independently (click the header, or press `Space`/`Enter`),
