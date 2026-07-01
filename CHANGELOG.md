@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Deleted repository directory no longer blanks the panel with a cryptic error**:
+  when a registered repo's root directory is deleted from disk, wtcc now shows an
+  actionable hint (`repository '<name>' directory missing — press Shift+D to remove
+  it`) instead of a double-prefixed `git worktree list failed` message, and no
+  longer shells out to `git` in a directory that is gone. A worktree whose own
+  directory was deleted is marked `[missing]` in the sidebar and can be cleared with
+  `d` (with a `git worktree prune` fallback). The missing-directory state is computed
+  once per refresh, so the render path never stats the filesystem (#81).
+
 ## [0.8.0] - 2026-06-30
 
 ### Added

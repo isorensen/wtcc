@@ -311,6 +311,25 @@ pub fn remove(repo_path: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Prunes worktree admin entries whose working directory no longer exists
+/// (`git worktree prune`). Used as a fallback when a stale worktree cannot be
+/// removed normally. Argument-vector spawn; non-zero exit surfaces as an error.
+pub fn prune(repo_path: &Path) -> anyhow::Result<()> {
+    let repo = repo_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", &repo, "worktree", "prune"])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git worktree prune failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
