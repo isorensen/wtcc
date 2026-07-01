@@ -6,7 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.8.3] - 2026-07-01
+## [0.8.4] - 2026-07-01
+
+### Added
+- **Agent surface falls back to a shell when the agent exits**: when the agent
+  command in the agent tab exits (e.g. `/exit` in Claude Code), the pane now drops
+  into an interactive shell in the worktree directory (your `$SHELL`, falling back
+  to `/bin/sh`) instead of dying as a dead `[exited]` pane — so the surface stays
+  usable and `Shift+R` can relaunch a fresh agent. tmux runs the agent under a
+  fixed `sh -c` wrapper; the agent command's tokens stay discrete argv params (no
+  shell interpolation). Shell and run tabs are unchanged (#80).
 
 ### Fixed
 - **Uppercase keybindings (`Shift+D`/`R`/`A`/`X`) now work under the Kitty keyboard
