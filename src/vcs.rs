@@ -60,11 +60,17 @@ impl VcsProvider for GitGhProvider {
 /// Runs `git -C <wt> status --porcelain`; non-empty output means dirty. A
 /// failure to spawn or a non-zero exit reports clean (not dirty) — the worst
 /// case is an out-of-date badge, never a crash.
+///
+/// `GIT_OPTIONAL_LOCKS=0` makes this read-only status check skip the index
+/// refresh's `.git/index.lock`, so a background badge refresh never races (and
+/// fails) a concurrent `git` command in the same worktree — the user's own, or
+/// another wtcc operation. (This also removes an intermittent CI test flake.)
 fn dirty(worktree_path: &Path) -> bool {
     let output = Command::new("git")
         .arg("-C")
         .arg(worktree_path)
         .args(["status", "--porcelain"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output();
     match output {
         Ok(out) if out.status.success() => is_dirty(&String::from_utf8_lossy(&out.stdout)),

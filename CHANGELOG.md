@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-07-01
+
+### Fixed
+- **Background PR/dirty-status refresh no longer takes `.git/index.lock`**: the
+  per-worktree badge refresh ran `git status --porcelain` without
+  `GIT_OPTIONAL_LOCKS=0`, so its index refresh briefly grabbed the worktree's
+  `index.lock` and could race — and fail — a concurrent `git` command (the user's
+  own, or another wtcc operation). The status check now runs read-only with
+  optional locks disabled. (Also removes an intermittent CI test flake.)
+
 ## [0.8.5] - 2026-07-01
 
 ### Fixed
