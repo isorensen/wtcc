@@ -65,7 +65,9 @@ fn app_with(branches: &[&str]) -> App {
         ..Default::default()
     };
     let mut app = App::new(cfg);
-    app.worktrees = worktrees(branches);
+    let wts = worktrees(branches);
+    app.worktree_repo = vec![0; wts.len()];
+    app.worktrees = wts;
     app.selected_worktree = Some(0);
     app.status = None;
     app

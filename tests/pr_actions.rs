@@ -66,6 +66,7 @@ fn base_app() -> App {
         is_bare: false,
         is_detached: false,
     }];
+    app.worktree_repo = vec![0];
     app.selected_worktree = Some(0);
     app.status = None;
     app.overlay = Overlay::None;
@@ -345,7 +346,7 @@ fn m_opens_a_merge_confirm_naming_the_branch() {
     let mut app = app_with_open_pr();
     handle_key(&mut app, key('m'));
     assert!(
-        matches!(app.overlay, Overlay::Confirm(Confirm::MergePr(ref b)) if b == "main"),
+        matches!(app.overlay, Overlay::Confirm(Confirm::MergePr { branch: ref b, .. }) if b == "main"),
         "m must open a MergePr confirm naming the branch, got {:?}",
         app.overlay
     );
@@ -375,7 +376,7 @@ fn palette_merge_pr_opens_a_merge_confirm() {
     let mut app = app_with_open_pr();
     run_palette(&mut app, "merge");
     assert!(
-        matches!(app.overlay, Overlay::Confirm(Confirm::MergePr(ref b)) if b == "main"),
+        matches!(app.overlay, Overlay::Confirm(Confirm::MergePr { branch: ref b, .. }) if b == "main"),
         "palette Merge PR must open a MergePr confirm, got {:?}",
         app.overlay
     );
@@ -393,7 +394,10 @@ fn n_aborts_the_merge_confirm() {
 fn confirming_merge_dispatches_to_pr_merge_branch_without_spawning_gh() {
     let mut app = app_with_open_pr();
     handle_key(&mut app, key('m'));
-    assert!(matches!(app.overlay, Overlay::Confirm(Confirm::MergePr(_))));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Confirm(Confirm::MergePr { .. })
+    ));
 
     // Drop the cached PR so the post-confirm `pr_merge_branch` takes its no-PR
     // guard: this proves the y-arm dispatches into `pr_merge_branch` (which
@@ -414,7 +418,7 @@ fn palette_close_pr_opens_a_close_confirm() {
     let mut app = app_with_open_pr();
     run_palette(&mut app, "close");
     assert!(
-        matches!(app.overlay, Overlay::Confirm(Confirm::ClosePr(ref b)) if b == "main"),
+        matches!(app.overlay, Overlay::Confirm(Confirm::ClosePr { branch: ref b, .. }) if b == "main"),
         "palette Close PR must open a ClosePr confirm, got {:?}",
         app.overlay
     );
@@ -424,7 +428,10 @@ fn palette_close_pr_opens_a_close_confirm() {
 fn confirming_close_dispatches_to_pr_close_branch_without_spawning_gh() {
     let mut app = app_with_open_pr();
     run_palette(&mut app, "close");
-    assert!(matches!(app.overlay, Overlay::Confirm(Confirm::ClosePr(_))));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Confirm(Confirm::ClosePr { .. })
+    ));
 
     app.vcs_status.clear();
     handle_key(&mut app, key('y'));
@@ -474,8 +481,14 @@ fn render_confirm_shows_the_branch_for_merge_and_close_without_panicking() {
     use ratatui::backend::TestBackend;
 
     for confirm in [
-        Confirm::MergePr("feature-x".to_string()),
-        Confirm::ClosePr("feature-x".to_string()),
+        Confirm::MergePr {
+            branch: "feature-x".to_string(),
+            path: PathBuf::from("/repo/feature-x"),
+        },
+        Confirm::ClosePr {
+            branch: "feature-x".to_string(),
+            path: PathBuf::from("/repo/feature-x"),
+        },
     ] {
         let mut app = base_app();
         app.overlay = Overlay::Confirm(confirm);

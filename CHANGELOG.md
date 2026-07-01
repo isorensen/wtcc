@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Expand multiple repositories at once**: each repo header in the sidebar can be
+  toggled open/closed independently (click the header, or press `Space`/`Enter`),
+  so several repos can show their worktrees at the same time instead of only the
+  single selected one. The header glyph reflects expansion (`▾` open / `▸`
+  collapsed) while color marks the selected repo; `j`/`k` still navigate within the
+  active repo. PR actions and jump-to-attention resolve worktrees by path (not by
+  branch name), so same-named branches across repos never target the wrong repo (#82).
+
 ## [0.8.1] - 2026-07-01
 
 ### Fixed

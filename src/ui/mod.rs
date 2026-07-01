@@ -253,10 +253,10 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
         Confirm::RestartAgent(branch) => {
             format!("Restart agent for {branch}? (y/n)")
         }
-        Confirm::MergePr(branch) => {
+        Confirm::MergePr { branch, .. } => {
             format!("Merge PR for {branch}? (y/n)")
         }
-        Confirm::ClosePr(branch) => {
+        Confirm::ClosePr { branch, .. } => {
             format!("Close PR for {branch}? (y/n)")
         }
     };
@@ -373,6 +373,7 @@ mod tests {
             is_bare: false,
             is_detached: false,
         }];
+        app.worktree_repo = vec![0];
         app.selected_worktree = Some(0);
         app.status = None;
         app
