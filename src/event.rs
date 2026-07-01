@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn confirming_restart_clears_active_session_and_sets_status() {
         let mut a = app();
-        a.active_session = Some(SessionManager::session_name("main"));
+        a.active_session = Some(SessionManager::session_name(&a.worktree_key(0, "main")));
         handle_key(&mut a, key(KeyCode::Char('R')));
         handle_key(&mut a, key(KeyCode::Char('y')));
         assert_eq!(a.overlay, Overlay::None);
@@ -674,8 +674,9 @@ mod tests {
             is_bare: false,
             is_detached: false,
         });
+        a.worktree_repo.push(0);
         a.selected_worktree = Some(0);
-        let feat = SessionManager::session_name("feat");
+        let feat = SessionManager::session_name(&a.worktree_key(0, "feat"));
         a.attention
             .poll(&[(feat.clone(), std::time::Duration::ZERO)], None);
         a.attention

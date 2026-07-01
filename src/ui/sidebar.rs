@@ -171,8 +171,8 @@ fn worktree_line<'a>(
     let mut spans = vec![
         Span::raw("  "),
         activity_span(
-            app.worktree_activity(&wt.branch),
-            app.attention_for(&wt.branch),
+            app.worktree_activity(app.worktree_repo[index], &wt.branch),
+            app.attention_for(app.worktree_repo[index], &wt.branch),
             theme,
         ),
         Span::raw(format!("{glyph} ")),
@@ -438,7 +438,7 @@ mod tests {
         app.selected_worktree = Some(0);
 
         // Give feat a real (exited) session and let it fall to Idle.
-        let name = SessionManager::session_name("feat");
+        let name = SessionManager::session_name(&app.worktree_key(0, "feat"));
         let mut cmd = portable_pty::CommandBuilder::new("printf");
         cmd.args(["x"]);
         app.session_manager

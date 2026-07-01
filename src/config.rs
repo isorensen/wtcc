@@ -90,25 +90,27 @@ impl Config {
         }
     }
 
-    /// Resolves the agent command for `branch`: its chosen preset's `cmd`, with a
-    /// total fallback to the first preset when the branch is unmapped or its
-    /// mapping names a preset that no longer exists. `presets()` is never empty,
-    /// so this always returns a command.
-    pub fn agent_cmd_for(&self, branch: &str) -> String {
+    /// Resolves the agent command for the composite worktree key `wt_key`
+    /// (`<repo>-<branch>`, #89): its chosen preset's `cmd`, with a total fallback
+    /// to the first preset when the key is unmapped or its mapping names a preset
+    /// that no longer exists. `presets()` is never empty, so this always returns a
+    /// command. MIGRATION: legacy bare-branch keys simply stop matching and fall
+    /// back to the first preset (the map is usually empty).
+    pub fn agent_cmd_for(&self, wt_key: &str) -> String {
         let presets = self.presets();
         self.worktree_agents
-            .get(branch)
+            .get(wt_key)
             .and_then(|name| presets.iter().find(|p| &p.name == name))
             .or_else(|| presets.first())
             .map(|p| p.cmd.clone())
             .unwrap_or_default()
     }
 
-    /// Records `branch`'s agent choice by preset `name`. Persistence is the
-    /// caller's responsibility.
-    pub fn set_worktree_agent(&mut self, branch: &str, name: &str) {
+    /// Records the composite worktree key `wt_key`'s agent choice by preset
+    /// `name`. Persistence is the caller's responsibility.
+    pub fn set_worktree_agent(&mut self, wt_key: &str, name: &str) {
         self.worktree_agents
-            .insert(branch.to_string(), name.to_string());
+            .insert(wt_key.to_string(), name.to_string());
     }
 
     pub fn load_from(path: &Path) -> anyhow::Result<Config> {
@@ -331,6 +333,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.agent_cmd_for("unmapped-branch"), "claude");
+    }
+
+    #[test]
+    fn a_legacy_bare_branch_key_no_longer_matches_the_composite_lookup() {
+        // MIGRATION (#89): keys became composite `<repo>-<branch>`. A pre-#89
+        // bare-branch entry stops matching and resolution falls back to the first
+        // preset. No migration code — the map is usually empty.
+        let mut worktree_agents = HashMap::new();
+        worktree_agents.insert("main".to_string(), "codex".to_string()); // legacy key
+        let cfg = Config {
+            agents: vec![
+                preset("claude", "claude"),
+                preset("codex", "codex --model x"),
+            ],
+            worktree_agents,
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.agent_cmd_for("demo-main"),
+            "claude",
+            "a composite lookup must not hit a legacy bare-branch key"
+        );
     }
 
     #[test]

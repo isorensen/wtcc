@@ -299,13 +299,13 @@ fn registering_tab_keys_introduces_no_chord_collisions_in_primary() {
 #[test]
 fn t_in_sidebar_focus_adds_a_shell_tab_to_the_current_worktree() {
     let mut app = app_with(&["main"]);
-    assert!(!app.layouts.contains_key("main"));
+    assert!(!app.layouts.contains_key(&app.worktree_key(0, "main")));
 
     handle_key(&mut app, key('t'));
 
     let layout = app
         .layouts
-        .get("main")
+        .get(&app.worktree_key(0, "main"))
         .expect("t must create the layout and add a shell tab");
     assert_eq!(layout.tabs.len(), 2);
     assert_eq!(layout.active, 1, "the new shell tab is focused");
@@ -317,10 +317,22 @@ fn bracket_keys_cycle_the_active_tab_in_sidebar_focus() {
     app.new_shell_tab(); // [agent, shell] active 1
 
     handle_key(&mut app, key(']')); // next, wrap to 0
-    assert_eq!(app.layouts.get("main").unwrap().active, 0);
+    assert_eq!(
+        app.layouts
+            .get(&app.worktree_key(0, "main"))
+            .unwrap()
+            .active,
+        0
+    );
 
     handle_key(&mut app, key('[')); // prev, wrap to 1
-    assert_eq!(app.layouts.get("main").unwrap().active, 1);
+    assert_eq!(
+        app.layouts
+            .get(&app.worktree_key(0, "main"))
+            .unwrap()
+            .active,
+        1
+    );
 }
 
 #[test]
@@ -330,7 +342,7 @@ fn w_in_sidebar_focus_closes_the_active_shell_tab() {
 
     handle_key(&mut app, key('w'));
 
-    let layout = app.layouts.get("main").unwrap();
+    let layout = app.layouts.get(&app.worktree_key(0, "main")).unwrap();
     assert_eq!(layout.tabs.len(), 1, "w closes the active shell tab");
     assert_eq!(layout.active, 0);
 }
@@ -345,7 +357,7 @@ fn tab_keys_in_agent_focus_do_not_manage_tabs() {
     handle_key(&mut app, key('t'));
 
     assert!(
-        !app.layouts.contains_key("main"),
+        !app.layouts.contains_key(&app.worktree_key(0, "main")),
         "tab management keys are inert in agent focus (forwarded to the PTY)"
     );
 }

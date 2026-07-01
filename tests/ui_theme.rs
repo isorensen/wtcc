@@ -183,12 +183,12 @@ fn attention_marker_uses_attention_color() {
 
     // Flag `feat` for attention through the public tracker (Busy -> Quiet edge),
     // no real PTY/session required.
-    let name = SessionManager::session_name("feat");
+    let name = SessionManager::session_name(&app.worktree_key(0, "feat"));
     app.attention
         .poll(&[(name.clone(), std::time::Duration::ZERO)], None);
     app.attention.poll(&[(name, ATTENTION_QUIET)], None);
     assert!(
-        app.attention_for("feat"),
+        app.attention_for(0, "feat"),
         "precondition: feat must be flagged for attention"
     );
 

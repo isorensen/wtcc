@@ -223,6 +223,23 @@ fn expand_path(input: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Stable FNV-1a (fixed-seed) short hash of a repo path, used only as a
+/// uniqueness discriminator in the worktree key so two repos never share a
+/// session/layout key even when their name+branch slugs collide (e.g.
+/// "advfit-ui"+"main" vs "advfit"+"ui-main"). Deterministic across runs so tmux
+/// reattach stays stable; computed from the stored path bytes only (no
+/// filesystem access, so it still works when the repo dir is missing).
+fn repo_hash(path: &Path) -> String {
+    const OFFSET: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut h = OFFSET;
+    for b in path.to_string_lossy().as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("{h:08x}")
+}
+
 impl App {
     pub fn new(config: Config) -> App {
         Self::with_provider(config, Arc::new(GitGhProvider))
@@ -278,12 +295,35 @@ impl App {
         self.selected_worktree.and_then(|i| self.worktrees.get(i))
     }
 
-    /// Activity state of the agent for `branch`, mapped through the
-    /// `wtcc-<slug>` session name. `None` when no session has been spawned for
-    /// that worktree. Cheap enough to call per worktree each frame.
-    pub fn worktree_activity(&self, branch: &str) -> ActivityState {
-        self.session_manager
-            .activity(&SessionManager::session_name(branch))
+    /// Composite per-worktree identity `"<repo-slug>-<branch-slug>-<hash>"` — THE
+    /// key for tmux sessions, tab layouts, and `worktree_agents`. With several
+    /// repos expanded (#82), two repos sharing a branch name (e.g. both `main`)
+    /// get distinct keys, so their agent sessions and presets never collide (#89).
+    /// The trailing `repo_hash` disambiguates cases where the name+branch slug
+    /// boundary is itself ambiguous (`"advfit-ui"+"main"` vs `"advfit"+"ui-main"`
+    /// both reduce to `advfit-ui-main`) and two repos that share a name. Falls
+    /// back to the bare branch slug when `repo_index` is out of range, so a stale
+    /// index never panics.
+    pub fn worktree_key(&self, repo_index: usize, branch: &str) -> String {
+        match self.config.repos.get(repo_index) {
+            Some(repo) => format!(
+                "{}-{}-{}",
+                crate::worktree::slugify(&repo.name),
+                crate::worktree::slugify(branch),
+                repo_hash(&repo.path),
+            ),
+            None => crate::worktree::slugify(branch),
+        }
+    }
+
+    /// Activity state of the agent for the worktree at `(repo_index, branch)`,
+    /// mapped through its composite `wtcc-<repo>-<branch>` session name. `None`
+    /// when no session has been spawned yet. Cheap enough to call per worktree
+    /// each frame.
+    pub fn worktree_activity(&self, repo_index: usize, branch: &str) -> ActivityState {
+        self.session_manager.activity(&SessionManager::session_name(
+            &self.worktree_key(repo_index, branch),
+        ))
     }
 
     pub fn select_repo(&mut self, index: usize) {
@@ -548,11 +588,12 @@ impl App {
         }
     }
 
-    /// Branch slug of the selected worktree, slugified so untrusted branch names
-    /// are safe to use as layout keys and session-name stems.
+    /// Composite key of the selected worktree (`<repo-slug>-<branch-slug>`), the
+    /// `layouts` map key and the stem passed to `WorktreeLayout`. Repo-qualified
+    /// so tab layouts and tab session names never collide across expanded repos
+    /// (#89). `None` when no repo/worktree is selected.
     pub fn current_slug(&self) -> Option<String> {
-        self.current_worktree()
-            .map(|w| crate::worktree::slugify(&w.branch))
+        Some(self.worktree_key(self.selected_repo?, &self.current_worktree()?.branch))
     }
 
     /// Returns the current worktree's layout, creating an agent-only one if none
@@ -654,14 +695,19 @@ impl App {
         };
         let branch = wt.branch.clone();
         let path = wt.path.clone();
-        let slug = crate::worktree::slugify(&branch);
+        // Composite (repo-qualified) key: the layout entry and the agent-command
+        // lookup MUST use the same key the tab session names are built from (#89).
+        let slug = self
+            .selected_repo
+            .map(|ri| self.worktree_key(ri, &branch))
+            .unwrap_or_else(|| crate::worktree::slugify(&branch));
         let tab = self
             .layouts
             .entry(slug.clone())
             .or_insert_with(|| WorktreeLayout::new(&slug))
             .active_tab()
             .clone();
-        let agent_cmd = self.config.agent_cmd_for(&branch);
+        let agent_cmd = self.config.agent_cmd_for(&slug);
         let run_cmd = self.selected_run_command();
         let result = match tab.kind {
             TabKind::Agent => self.session_manager.ensure_named(
@@ -705,15 +751,23 @@ impl App {
             .filter_map(|name| {
                 self.worktrees
                     .iter()
-                    .find(|w| &SessionManager::session_name(&w.branch) == name)
-                    .map(|w| w.branch.clone())
+                    .enumerate()
+                    .find(|(i, w)| {
+                        self.worktree_repo.get(*i).is_some_and(|&ri| {
+                            &SessionManager::session_name(&self.worktree_key(ri, &w.branch)) == name
+                        })
+                    })
+                    .map(|(_, w)| w.branch.clone())
             })
             .collect()
     }
 
-    /// Whether the agent for `branch` is currently flagged for attention.
-    pub fn attention_for(&self, branch: &str) -> bool {
-        self.attention.needs(&SessionManager::session_name(branch))
+    /// Whether the agent for the worktree at `(repo_index, branch)` is currently
+    /// flagged for attention. Keyed by the composite session name (#89).
+    pub fn attention_for(&self, repo_index: usize, branch: &str) -> bool {
+        self.attention.needs(&SessionManager::session_name(
+            &self.worktree_key(repo_index, branch),
+        ))
     }
 
     /// How many agents are currently flagged for attention.
@@ -731,13 +785,14 @@ impl App {
         let start = self.selected_worktree.unwrap_or(0);
         for offset in 1..=n {
             let i = (start + offset) % n;
-            if self.attention_for(&self.worktrees[i].branch) {
+            let Some(&ri) = self.worktree_repo.get(i) else {
+                continue;
+            };
+            if self.attention_for(ri, &self.worktrees[i].branch) {
                 self.selected_worktree = Some(i);
                 // The flagged worktree may live in another expanded repo;
                 // activate its repo to keep the selection invariant.
-                if let Some(&ri) = self.worktree_repo.get(i) {
-                    self.selected_repo = Some(ri);
-                }
+                self.selected_repo = Some(ri);
                 return;
             }
         }
@@ -842,14 +897,18 @@ impl App {
             self.status = Some("no repo selected".to_string());
             return;
         };
+        // A rename only changes the branch, never the repo, so both session keys
+        // share the selected repo qualifier (#89).
+        let repo_idx = self.selected_repo.unwrap_or(usize::MAX);
         if worktree::branch_exists(&repo, new) {
             self.status = Some(format!("branch already exists: {new}"));
             return;
         }
         match worktree::rename_branch(&repo, &old_branch, new) {
             Ok(()) => {
-                let old_name = SessionManager::session_name(&old_branch);
-                let new_name = SessionManager::session_name(new);
+                let old_name =
+                    SessionManager::session_name(&self.worktree_key(repo_idx, &old_branch));
+                let new_name = SessionManager::session_name(&self.worktree_key(repo_idx, new));
                 self.session_manager.rename(&old_name, &new_name);
                 if self.active_session.as_deref() == Some(old_name.as_str()) {
                     self.active_session = Some(new_name);
@@ -945,18 +1004,22 @@ impl App {
         // Spec ordering: kill agent session -> archive -> git remove. The agent
         // is reaped first so it is quiescent before the archive runs (it can't be
         // writing files mid-archive).
-        let branch = self
-            .worktrees
-            .iter()
-            .find(|w| w.path == path)
-            .map(|w| w.branch.clone());
+        // Resolve by the worktree's PATH (unique) to recover its repo index, so
+        // the composite session key matches the one its tabs were built with even
+        // when another expanded repo shares the branch name (#89).
+        let target = self.worktrees.iter().position(|w| w.path == path).map(|i| {
+            (
+                self.worktrees[i].branch.clone(),
+                self.worktree_repo.get(i).copied().unwrap_or(usize::MAX),
+            )
+        });
         // `Session::Drop` detaches without killing tmux (for reattach), so the
         // explicit remove path is the only place that reaps the worktree's
         // sessions. Kill EVERY tab surface (`wtcc-<slug>` agent + `wtcc-<slug>-t*`
         // shells) and drop the layout so no shell session is orphaned (#48), then
         // the branch-keyed agent kill covers the no-layout case. Best-effort.
-        if let Some(branch) = branch.as_deref() {
-            let slug = crate::worktree::slugify(branch);
+        if let Some((branch, repo_idx)) = target {
+            let slug = self.worktree_key(repo_idx, &branch);
             if let Some(layout) = self.layouts.remove(&slug) {
                 for tab in &layout.tabs {
                     self.session_manager.kill(&tab.session);
@@ -965,7 +1028,7 @@ impl App {
                     }
                 }
             }
-            let name = SessionManager::session_name(branch);
+            let name = SessionManager::session_name(&slug);
             self.session_manager.kill(&name);
             if self.active_session.as_deref() == Some(name.as_str()) {
                 self.active_session = None;
@@ -1077,7 +1140,11 @@ impl App {
     /// agent next frame. Touches only the named session, never other worktrees'.
     /// Works whether or not a live local session exists.
     pub fn restart_agent(&mut self, branch: &str) {
-        let name = SessionManager::session_name(branch);
+        // `branch` is always the current worktree's, so its repo is `selected_repo`
+        // (the #82 invariant); build the composite key it was spawned under (#89).
+        let name = SessionManager::session_name(
+            &self.worktree_key(self.selected_repo.unwrap_or(usize::MAX), branch),
+        );
         self.session_manager.kill(&name);
         if self.active_session.as_deref() == Some(name.as_str()) {
             self.active_session = None;
@@ -1102,13 +1169,16 @@ impl App {
             self.status = Some(format!("unknown agent '{name}'; available: {available}"));
             return;
         }
-        self.config.set_worktree_agent(branch, name);
+        // Key the preset by the composite so a same-named branch in another repo
+        // keeps its own agent choice (#89).
+        let key = self.worktree_key(self.selected_repo.unwrap_or(usize::MAX), branch);
+        self.config.set_worktree_agent(&key, name);
         let save = match &self.config_path {
             Some(path) => self.config.save_to(path),
             None => self.config.save(),
         };
         if let Err(e) = save {
-            self.config.worktree_agents.remove(branch);
+            self.config.worktree_agents.remove(&key);
             self.status = Some(format!("save failed: {e}"));
             return;
         }
@@ -1346,8 +1416,8 @@ mod tests {
         use portable_pty::CommandBuilder;
 
         let mut app = app_with_fake_worktrees();
-        let main = SessionManager::session_name("main");
-        let feat = SessionManager::session_name("feat");
+        let main = SessionManager::session_name(&app.worktree_key(0, "main"));
+        let feat = SessionManager::session_name(&app.worktree_key(0, "feat"));
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         let mut b = CommandBuilder::new("printf");
@@ -1394,8 +1464,8 @@ mod tests {
         use portable_pty::CommandBuilder;
 
         let mut app = app_with_fake_worktrees(); // main(/repo/main), feat(/repo/feat)
-        let main = SessionManager::session_name("main");
-        let feat = SessionManager::session_name("feat");
+        let main = SessionManager::session_name(&app.worktree_key(0, "main"));
+        let feat = SessionManager::session_name(&app.worktree_key(0, "feat"));
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         let mut b = CommandBuilder::new("printf");
@@ -1427,7 +1497,7 @@ mod tests {
     #[test]
     fn remove_worktree_without_live_session_is_safe() {
         let mut app = app_with_fake_worktrees();
-        let feat = SessionManager::session_name("feat");
+        let feat = SessionManager::session_name(&app.worktree_key(0, "feat"));
         // No session was ever spawned for feat: the best-effort kill must not
         // panic and must leave no session behind.
         app.remove_worktree(&PathBuf::from("/repo/feat"));
@@ -1775,10 +1845,10 @@ mod tests {
 
     // --- issue #47: attention routing ---------------------------------------
 
-    /// Drives the tracker through a Busy->Quiet edge for `branch`'s session so
-    /// it becomes flagged, without needing a real PTY.
-    fn flag_branch(app: &mut App, branch: &str) {
-        let name = SessionManager::session_name(branch);
+    /// Drives the tracker through a Busy->Quiet edge for the worktree at
+    /// `(repo_index, branch)` — flagging its composite session — without a real PTY.
+    fn flag_branch(app: &mut App, repo_index: usize, branch: &str) {
+        let name = SessionManager::session_name(&app.worktree_key(repo_index, branch));
         let busy = [(name.clone(), std::time::Duration::ZERO)];
         let quiet = [(name, crate::session::ATTENTION_QUIET)];
         app.attention.poll(&busy, None);
@@ -1788,7 +1858,7 @@ mod tests {
     #[test]
     fn jump_to_attention_advances_to_flagged_worktree() {
         let mut app = app_with_fake_worktrees(); // main(0), feat(1), selected 0
-        flag_branch(&mut app, "feat");
+        flag_branch(&mut app, 0, "feat");
         app.jump_to_attention();
         assert_eq!(app.selected_worktree, Some(1));
     }
@@ -1804,13 +1874,13 @@ mod tests {
     fn attention_count_and_attention_for_reflect_the_flagged_set() {
         let mut app = app_with_fake_worktrees();
         assert_eq!(app.attention_count(), 0);
-        assert!(!app.attention_for("feat"));
+        assert!(!app.attention_for(0, "feat"));
 
-        flag_branch(&mut app, "feat");
+        flag_branch(&mut app, 0, "feat");
 
         assert_eq!(app.attention_count(), 1);
-        assert!(app.attention_for("feat"));
-        assert!(!app.attention_for("main"));
+        assert!(app.attention_for(0, "feat"));
+        assert!(!app.attention_for(0, "main"));
     }
 
     #[test]
@@ -1906,7 +1976,7 @@ mod tests {
         let mut app = app_for_repo(repo);
 
         let old_branch = app.current_worktree().unwrap().branch.clone();
-        let old_name = SessionManager::session_name(&old_branch);
+        let old_name = SessionManager::session_name(&app.worktree_key(0, &old_branch));
         let other_name = SessionManager::session_name("other-wt");
         let mut s = CommandBuilder::new("printf");
         s.args(["x"]);
@@ -1922,7 +1992,7 @@ mod tests {
 
         app.rename_branch("renamed-branch");
 
-        let new_name = SessionManager::session_name("renamed-branch");
+        let new_name = SessionManager::session_name(&app.worktree_key(0, "renamed-branch"));
         assert!(
             app.session_manager.get(&old_name).is_none(),
             "the old session key must be gone"
@@ -1967,7 +2037,7 @@ mod tests {
         let mut app = app_for_repo(repo);
 
         let old_branch = app.current_worktree().unwrap().branch.clone();
-        let old_name = SessionManager::session_name(&old_branch);
+        let old_name = SessionManager::session_name(&app.worktree_key(0, &old_branch));
         let mut s = CommandBuilder::new("printf");
         s.args(["x"]);
         app.session_manager
@@ -2075,8 +2145,9 @@ mod tests {
         }];
         app.config_path = Some(cfg_path.clone());
 
-        let main = SessionManager::session_name("main");
-        let feat = SessionManager::session_name("feat");
+        let key = app.worktree_key(0, "main");
+        let main = SessionManager::session_name(&key);
+        let feat = SessionManager::session_name(&app.worktree_key(0, "feat"));
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         let mut b = CommandBuilder::new("printf");
@@ -2092,9 +2163,9 @@ mod tests {
         app.set_worktree_agent("main", "codex");
 
         assert_eq!(
-            app.config.worktree_agents.get("main"),
+            app.config.worktree_agents.get(&key),
             Some(&"codex".to_string()),
-            "the choice must be recorded in config"
+            "the choice must be recorded in config under the composite key"
         );
         assert!(
             app.session_manager.get(&main).is_none(),
@@ -2112,7 +2183,7 @@ mod tests {
 
         let persisted = Config::load_from(&cfg_path).unwrap();
         assert_eq!(
-            persisted.worktree_agents.get("main"),
+            persisted.worktree_agents.get(&key),
             Some(&"codex".to_string()),
             "the choice must survive a restart (persisted to config_path)"
         );
@@ -2131,7 +2202,8 @@ mod tests {
         }];
         app.config_path = Some(cfg_path.clone());
 
-        let main = SessionManager::session_name("main");
+        let key = app.worktree_key(0, "main");
+        let main = SessionManager::session_name(&key);
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         app.session_manager
@@ -2142,7 +2214,7 @@ mod tests {
         app.set_worktree_agent("main", "bogus");
 
         assert_eq!(
-            app.config.worktree_agents.get("main"),
+            app.config.worktree_agents.get(&key),
             None,
             "an unknown preset name must not be recorded"
         );
@@ -2264,20 +2336,21 @@ mod tests {
 
     #[test]
     fn new_shell_tab_creates_the_layout_and_appends_a_focused_shell() {
-        let mut app = app_with_fake_worktrees(); // main selected
-        assert!(!app.layouts.contains_key("main"));
+        let mut app = app_with_fake_worktrees(); // main selected (repo "demo")
+        let key = app.worktree_key(0, "main");
+        assert!(!app.layouts.contains_key(&key));
 
         app.new_shell_tab();
 
         let layout = app
             .layouts
-            .get("main")
+            .get(&key)
             .expect("new_shell_tab must create the worktree's layout");
         assert_eq!(layout.tabs.len(), 2, "agent tab + one shell tab");
         assert_eq!(layout.active, 1, "the new shell tab is focused");
-        assert_eq!(layout.tabs[0].session, SessionManager::session_name("main"));
+        assert_eq!(layout.tabs[0].session, SessionManager::session_name(&key));
         assert_eq!(layout.tabs[0].kind, crate::layout::TabKind::Agent);
-        assert_eq!(layout.tabs[1].session, "wtcc-main-t1");
+        assert_eq!(layout.tabs[1].session, format!("wtcc-{key}-t1"));
         assert_eq!(layout.tabs[1].kind, crate::layout::TabKind::Shell);
     }
 
@@ -2286,10 +2359,11 @@ mod tests {
         let mut app = app_with_fake_worktrees();
         app.new_shell_tab(); // [agent, shell] active 1
 
+        let key = app.worktree_key(0, "main");
         app.next_tab(); // wrap to 0
-        assert_eq!(app.layouts.get("main").unwrap().active, 0);
+        assert_eq!(app.layouts.get(&key).unwrap().active, 0);
         app.prev_tab(); // wrap to 1
-        assert_eq!(app.layouts.get("main").unwrap().active, 1);
+        assert_eq!(app.layouts.get(&key).unwrap().active, 1);
     }
 
     #[test]
@@ -2297,9 +2371,10 @@ mod tests {
         use portable_pty::CommandBuilder;
 
         let mut app = app_with_fake_worktrees();
-        app.new_shell_tab(); // active shell, session wtcc-main-t1
-        let agent = SessionManager::session_name("main"); // wtcc-main
-        let shell = "wtcc-main-t1".to_string();
+        let key = app.worktree_key(0, "main");
+        app.new_shell_tab(); // active shell, session wtcc-<key>-t1
+        let agent = SessionManager::session_name(&key); // wtcc-<key>
+        let shell = format!("wtcc-{key}-t1");
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         let mut b = CommandBuilder::new("printf");
@@ -2322,7 +2397,7 @@ mod tests {
             app.session_manager.get(&agent).is_some(),
             "the agent (tab 0) session must survive a shell-tab close"
         );
-        let layout = app.layouts.get("main").unwrap();
+        let layout = app.layouts.get(&key).unwrap();
         assert_eq!(layout.tabs.len(), 1);
         assert_eq!(layout.active, 0, "focus falls back to the agent tab");
         assert_eq!(
@@ -2340,7 +2415,7 @@ mod tests {
 
         app.close_tab(); // only the agent tab remains: guarded no-op
 
-        let layout = app.layouts.get("main").unwrap();
+        let layout = app.layouts.get(&app.worktree_key(0, "main")).unwrap();
         assert_eq!(layout.tabs.len(), 1, "the agent tab is not closable");
         assert_eq!(layout.active, 0);
         assert!(
@@ -2354,7 +2429,7 @@ mod tests {
         use portable_pty::CommandBuilder;
 
         let mut app = app_with_fake_worktrees(); // main selected
-        let agent = SessionManager::session_name("main");
+        let agent = SessionManager::session_name(&app.worktree_key(0, "main"));
         let mut a = CommandBuilder::new("printf");
         a.args(["x"]);
         // Pre-seed the agent session so the active tab's ensure reuses it
@@ -2367,7 +2442,7 @@ mod tests {
 
         let layout = app
             .layouts
-            .get("main")
+            .get(&app.worktree_key(0, "main"))
             .expect("ensure_active_session must seed the worktree layout");
         assert_eq!(
             layout.tabs.len(),
@@ -2393,15 +2468,17 @@ mod tests {
 
         app.selected_worktree = Some(0); // back to main
 
-        let main = app.layouts.get("main").unwrap();
+        let main_key = app.worktree_key(0, "main");
+        let feat_key = app.worktree_key(0, "feat");
+        let main = app.layouts.get(&main_key).unwrap();
         assert_eq!(main.tabs.len(), 2);
         assert_eq!(main.active, 1);
-        assert_eq!(main.tabs[1].session, "wtcc-main-t1");
+        assert_eq!(main.tabs[1].session, format!("wtcc-{main_key}-t1"));
 
-        let feat = app.layouts.get("feat").unwrap();
+        let feat = app.layouts.get(&feat_key).unwrap();
         assert_eq!(feat.tabs.len(), 3);
         assert_eq!(feat.active, 2);
-        assert_eq!(feat.tabs[2].session, "wtcc-feat-t2");
+        assert_eq!(feat.tabs[2].session, format!("wtcc-{feat_key}-t2"));
     }
 
     #[test]
@@ -2416,9 +2493,9 @@ mod tests {
         });
         app.selected_worktree = Some(app.worktrees.len() - 1);
         assert_eq!(
-            app.current_slug().as_deref(),
-            Some("feature-big-thing"),
-            "current_slug must slugify untrusted branch names before they key state"
+            app.current_slug(),
+            Some(app.worktree_key(0, "Feature/Big Thing")),
+            "current_slug must repo-qualify and slugify untrusted branch names before they key state"
         );
     }
 
@@ -2442,7 +2519,7 @@ mod tests {
 
         let no_run_tab = app
             .layouts
-            .get("main")
+            .get(&app.worktree_key(0, "main"))
             .is_none_or(|l| l.tabs.iter().all(|t| t.kind != crate::layout::TabKind::Run));
         assert!(no_run_tab, "no run script -> no Run tab is opened");
         assert!(
@@ -2451,7 +2528,9 @@ mod tests {
         );
         assert!(
             app.session_manager
-                .get(&crate::session::run_session_name("main"))
+                .get(&crate::session::run_session_name(
+                    &app.worktree_key(0, "main")
+                ))
                 .is_none(),
             "no run script must spawn nothing"
         );
@@ -2466,7 +2545,7 @@ mod tests {
 
         let layout = app
             .layouts
-            .get("main")
+            .get(&app.worktree_key(0, "main"))
             .expect("start_run_script must create/keep the worktree layout");
         assert!(
             layout.tabs.len() >= 2,
@@ -2479,10 +2558,9 @@ mod tests {
             .expect("a Run tab must be appended");
         assert_eq!(
             run_tab.session,
-            crate::session::run_session_name("main"),
+            crate::session::run_session_name(&app.worktree_key(0, "main")),
             "the Run tab is backed by the wtcc-run-<slug> session"
         );
-        assert_eq!(run_tab.session, "wtcc-run-main");
         assert!(
             run_tab.title == "run" || run_tab.title == "pnpm dev",
             "a run tab's title is 'run' or the command, got {:?}",
@@ -2504,8 +2582,8 @@ mod tests {
         // Open the run tab so the run session is part of main's layout.
         app.start_run_script();
 
-        let run = crate::session::run_session_name("main"); // wtcc-run-main
-        let feat = SessionManager::session_name("feat");
+        let run = crate::session::run_session_name(&app.worktree_key(0, "main")); // wtcc-run-<key>
+        let feat = SessionManager::session_name(&app.worktree_key(0, "feat"));
         let mut a = CommandBuilder::new("printf");
         a.args(["a"]);
         let mut b = CommandBuilder::new("printf");
@@ -2547,6 +2625,95 @@ mod tests {
             copy_on_create: Vec::new(),
             run: None,
         }
+    }
+
+    #[test]
+    fn worktree_key_is_repo_qualified_hashed_and_defensive_on_a_bad_index() {
+        let app = app_with_fake_worktrees(); // one repo "demo"
+        let path = app.config.repos[0].path.clone();
+        // Shape: <repo-slug>-<branch-slug>-<path-hash>.
+        assert_eq!(
+            app.worktree_key(0, "main"),
+            format!("demo-main-{}", repo_hash(&path))
+        );
+        // Untrusted branch names are slugified into the composite.
+        assert_eq!(
+            app.worktree_key(0, "Feature/Big Thing"),
+            format!("demo-feature-big-thing-{}", repo_hash(&path))
+        );
+        // Out-of-range repo index falls back to the bare branch slug (no panic).
+        assert_eq!(app.worktree_key(99, "main"), "main");
+    }
+
+    #[test]
+    fn worktree_key_disambiguates_ambiguous_name_branch_slug_boundaries() {
+        // Issue #89 (adversarial): "advfit-ui"+"main" and "advfit"+"ui-main" both
+        // reduce to the slug `advfit-ui-main`; a `--` separator would not help
+        // because session_name/WorktreeLayout re-slugify it back to `-`. The path
+        // hash keeps their keys — and thus their tmux sessions — distinct.
+        let mut app = app_with_fake_worktrees();
+        app.config.repos = vec![
+            repo_entry("advfit", PathBuf::from("/x/advfit")),
+            repo_entry("advfit-ui", PathBuf::from("/x/advfit-ui")),
+        ];
+        let key_a = app.worktree_key(0, "ui-main");
+        let key_b = app.worktree_key(1, "main");
+        assert_ne!(
+            key_a, key_b,
+            "ambiguous name+branch slug boundary must not collide"
+        );
+        assert_ne!(
+            SessionManager::session_name(&key_a),
+            SessionManager::session_name(&key_b),
+            "agent session names must differ despite identical name+branch slugs"
+        );
+    }
+
+    #[test]
+    fn two_repos_sharing_a_branch_get_independent_sessions_and_layouts() {
+        // Issue #89: with several repos expanded, a same-named branch (both
+        // "main") must resolve to DISTINCT composite keys, agent session names,
+        // and tab layouts — no cross-talk.
+        let mut app = app_with_fake_worktrees(); // repo 0 = "demo"
+        app.config
+            .repos
+            .push(repo_entry("other", PathBuf::from("/repo-other")));
+        app.worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo-demo/main"),
+                branch: "main".to_string(),
+                head: "a".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+            Worktree {
+                path: PathBuf::from("/repo-other/main"),
+                branch: "main".to_string(),
+                head: "b".to_string(),
+                is_bare: false,
+                is_detached: false,
+            },
+        ];
+        app.worktree_repo = vec![0, 1];
+
+        let key_a = app.worktree_key(0, "main");
+        let key_b = app.worktree_key(1, "main");
+        assert_ne!(key_a, key_b, "same branch under two repos must not collide");
+        assert_ne!(
+            SessionManager::session_name(&key_a),
+            SessionManager::session_name(&key_b),
+            "agent session names must differ per repo"
+        );
+
+        // A shell tab opened in repo A's `main` must NOT appear in repo B's `main`.
+        app.selected_repo = Some(0);
+        app.selected_worktree = Some(0);
+        app.new_shell_tab();
+        assert!(app.layouts.contains_key(&key_a), "repo A's layout exists");
+        assert!(
+            !app.layouts.contains_key(&key_b),
+            "repo B's same-named branch keeps an independent layout"
+        );
     }
 
     /// Two real git repos, both registered and EXPANDED, selection on repo 0.
@@ -2688,7 +2855,7 @@ mod tests {
             .position(|&ri| ri == 1)
             .expect("repo B's worktree is listed");
         let b_branch = app.worktrees[b_idx].branch.clone();
-        flag_branch(&mut app, &b_branch);
+        flag_branch(&mut app, 1, &b_branch);
 
         app.jump_to_attention();
 
