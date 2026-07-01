@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-01
+
 ### Fixed
 - **Deleted repository directory no longer blanks the panel with a cryptic error**:
   when a registered repo's root directory is deleted from disk, wtcc now shows an
