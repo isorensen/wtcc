@@ -2,10 +2,31 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Whether a registered target is a real git repository or a plain (non-git)
+/// directory. A plain dir is modeled as a repo with one synthetic worktree that
+/// IS the directory, so git-only actions gate off the single `is_git` predicate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoKind {
+    #[default]
+    Git,
+    Plain,
+}
+
+impl RepoKind {
+    pub fn is_git(&self) -> bool {
+        matches!(self, RepoKind::Git)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Repository {
     pub name: String,
     pub path: PathBuf,
+    /// Git vs plain directory. Legacy configs and git repos omit this field
+    /// (serde default `Git`); only plain dirs serialize `kind = "plain"`.
+    #[serde(default, skip_serializing_if = "RepoKind::is_git")]
+    pub kind: RepoKind,
     /// User-authored command run once (best-effort) in the new worktree after it
     /// is created. Absent in legacy configs and omitted from output when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,8 +61,6 @@ pub struct Repository {
 pub enum RegisterError {
     #[error("not a directory: {0}")]
     NotADirectory(PathBuf),
-    #[error("not a git repository (no .git entry): {0}")]
-    NotAGitRepo(PathBuf),
 }
 
 pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
@@ -51,9 +70,11 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
         return Err(RegisterError::NotADirectory(path));
     }
 
-    if !path.join(".git").exists() {
-        return Err(RegisterError::NotAGitRepo(path));
-    }
+    let kind = if path.join(".git").exists() {
+        RepoKind::Git
+    } else {
+        RepoKind::Plain
+    };
 
     let name = path
         .file_name()
@@ -63,6 +84,7 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
     Ok(Repository {
         name,
         path,
+        kind,
         setup: None,
         archive: None,
         archived: Vec::new(),
@@ -72,16 +94,23 @@ pub fn register(path: impl Into<PathBuf>) -> Result<Repository, RegisterError> {
     })
 }
 
+impl Repository {
+    pub fn is_git(&self) -> bool {
+        self.kind.is_git()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
     #[test]
-    fn register_without_git_dir_is_not_a_git_repo() {
+    fn register_without_git_dir_is_a_plain_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let err = register(dir.path()).unwrap_err();
-        assert!(matches!(err, RegisterError::NotAGitRepo(_)));
+        let repo = register(dir.path()).unwrap();
+        assert_eq!(repo.kind, RepoKind::Plain);
+        assert!(!repo.is_git());
     }
 
     #[test]
@@ -94,6 +123,8 @@ mod tests {
         let repo = register(&repo_path).unwrap();
         assert_eq!(repo.name, "my-repo");
         assert_eq!(repo.path, repo_path);
+        assert_eq!(repo.kind, RepoKind::Git);
+        assert!(repo.is_git());
     }
 
     #[test]

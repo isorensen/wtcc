@@ -601,7 +601,7 @@ fn run_action(app: &mut App, action: Action) {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::repository::Repository;
+    use crate::repository::{RepoKind, Repository};
     use crate::session::SessionManager;
     use crate::worktree::Worktree;
     use std::path::PathBuf;
@@ -621,6 +621,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -882,6 +883,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             })
             .collect()
     }
@@ -1060,6 +1062,7 @@ mod tests {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: RepoKind::Git,
         });
         a.expanded_repos.insert(PathBuf::from("/tmp/nope2"));
         // Flat list spanning both repos: repo 0's worktree, then repo 1's.
@@ -1112,6 +1115,7 @@ mod tests {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: RepoKind::Git,
         });
         a.worktree_repo = vec![0];
         assert!(!a.expanded_repos.contains(&PathBuf::from("/tmp/nope2")));

@@ -249,7 +249,7 @@ fn short_path(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::repository::Repository;
+    use crate::repository::{RepoKind, Repository};
     use crate::session::{ATTENTION_QUIET, SessionManager, WORKING_WINDOW};
     use crate::worktree::Worktree;
     use std::path::PathBuf;
@@ -313,6 +313,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -376,6 +377,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -420,6 +422,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,

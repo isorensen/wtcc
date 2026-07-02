@@ -39,6 +39,7 @@ fn app_one_worktree() -> App {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: wtcc::repository::RepoKind::Git,
         }],
         agent_cmd: "claude".to_string(),
         notify: true,

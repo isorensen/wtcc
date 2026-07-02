@@ -53,6 +53,7 @@ fn app_with_presets() -> App {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: wtcc::repository::RepoKind::Git,
         }],
         agents: vec![
             preset("claude", "claude"),
