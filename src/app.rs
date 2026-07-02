@@ -324,6 +324,16 @@ impl App {
         self.selected_worktree.and_then(|i| self.worktrees.get(i))
     }
 
+    /// The single predicate that gates every git-only action. Defaults to `true`
+    /// when nothing is selected so "no selection" keeps today's behavior; only a
+    /// selected PLAIN dir returns `false`.
+    fn selected_repo_is_git(&self) -> bool {
+        self.selected_repo
+            .and_then(|ri| self.config.repos.get(ri))
+            .map(|r| r.is_git())
+            .unwrap_or(true)
+    }
+
     /// Composite per-worktree identity `"<repo-slug>-<branch-slug>-<hash>"` — THE
     /// key for tmux sessions, tab layouts, and `worktree_agents`. With several
     /// repos expanded (#82), two repos sharing a branch name (e.g. both `main`)
@@ -421,6 +431,21 @@ impl App {
             if !repo.path.exists() {
                 continue;
             }
+            // A plain (non-git) dir is not a git repo: never shell out to git.
+            // It IS one synthetic worktree — the directory itself. The slug
+            // branch feeds the #89 session key; the repo-path hash already makes
+            // the key unique, so the dir-name slug is enough.
+            if !repo.is_git() {
+                worktrees.push(Worktree {
+                    path: repo.path.clone(),
+                    branch: worktree::slugify(&repo.name),
+                    head: String::new(),
+                    is_bare: false,
+                    is_detached: false,
+                });
+                worktree_repo.push(ri);
+                continue;
+            }
             // On a list error, skip this repo's worktrees (do not blank all).
             if let Ok(list) = worktree::list(&repo.path) {
                 for wt in list {
@@ -499,6 +524,8 @@ impl App {
                 self.worktree_repo
                     .get(i)
                     .and_then(|&ri| self.config.repos.get(ri))
+                    // A plain dir has no git/gh status to compute — skip it.
+                    .filter(|repo| repo.is_git())
                     .map(|repo| (repo.path.clone(), wt.clone()))
             })
             .collect();
@@ -862,6 +889,10 @@ impl App {
     }
 
     pub fn add_worktree(&mut self, branch: &str) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         let branch = branch.trim();
         if branch.is_empty() {
             self.status = Some("branch name cannot be empty".to_string());
@@ -920,6 +951,10 @@ impl App {
     /// session key is slugified. Guards (empty name, no/detached/bare worktree,
     /// name collision) and any git failure land in `status` — never panics.
     pub fn rename_branch(&mut self, new: &str) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         let new = new.trim();
         if new.is_empty() {
             self.status = Some("branch name cannot be empty".to_string());
@@ -966,9 +1001,10 @@ impl App {
     }
 
     /// Registers a repository from a user-entered path: expands `~` and resolves
-    /// relative paths against the current directory, validates it is a git repo,
-    /// then persists, selects it, and loads its worktrees. All failure modes
-    /// (bad path, not a git repo, save error) land in `status` — never panics.
+    /// relative paths against the current directory, classifies it as git or a
+    /// plain dir, then persists, selects it, and loads its worktrees. All failure
+    /// modes (bad path, not a directory, save error) land in `status` — never
+    /// panics.
     pub fn register_repository(&mut self, input: &str) {
         let input = input.trim();
         if input.is_empty() {
@@ -1043,6 +1079,10 @@ impl App {
     }
 
     pub fn remove_worktree(&mut self, path: &std::path::Path) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         let Some(repo) = self.selected_repo_path().map(|p| p.to_path_buf()) else {
             self.status = Some("no repo selected".to_string());
             return;
@@ -1254,6 +1294,10 @@ impl App {
     /// immediately (no confirm). Guards and any `gh` failure land in `status`.
     /// Opens nothing on the `gh` side, so it never refreshes the cached status.
     pub fn pr_open_in_browser(&mut self) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         self.status = Some(match self.pr_target() {
             Ok((branch, path)) => {
                 match crate::pr::run_gh(&crate::pr::open_in_browser_argv(&branch), &path) {
@@ -1270,6 +1314,10 @@ impl App {
     /// PR badge reflects the new state. Guards and any `gh` failure land in
     /// `status`.
     pub fn pr_mark_ready(&mut self) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         let status = match self.pr_target() {
             Ok((branch, path)) => {
                 match crate::pr::run_gh(&crate::pr::mark_ready_argv(&branch), &path) {
@@ -1290,6 +1338,10 @@ impl App {
     /// cached VCS status is refreshed so the sidebar PR badge updates. Guards and
     /// any `gh` failure land in `status`.
     pub fn pr_merge_branch(&mut self, branch: &str, path: &Path) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         // Re-validate against current state: a stale confirm (the PR vanished
         // between opening the dialog and confirming) guards out cleanly.
         if self.vcs_status.get(path).and_then(|s| s.pr).is_none() {
@@ -1312,6 +1364,10 @@ impl App {
     /// status is refreshed so the sidebar PR badge updates. Guards and any `gh`
     /// failure land in `status`.
     pub fn pr_close_branch(&mut self, branch: &str, path: &Path) {
+        if !self.selected_repo_is_git() {
+            self.status = Some("not a git repository".into());
+            return;
+        }
         // Re-validate against current state: a stale confirm (the PR vanished
         // between opening the dialog and confirming) guards out cleanly.
         if self.vcs_status.get(path).and_then(|s| s.pr).is_none() {
@@ -1332,7 +1388,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::Repository;
+    use crate::repository::{RepoKind, Repository};
     use crate::vcs::{ChecksState, PrState, PrStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -1397,6 +1453,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -1682,6 +1739,7 @@ mod tests {
                         base_ref: None,
                         copy_on_create: Vec::new(),
                         run: None,
+                        kind: RepoKind::Git,
                     },
                     Repository {
                         name: "repo-b".to_string(),
@@ -1692,6 +1750,7 @@ mod tests {
                         base_ref: None,
                         copy_on_create: Vec::new(),
                         run: None,
+                        kind: RepoKind::Git,
                     },
                 ],
                 agent_cmd: "claude".to_string(),
@@ -1967,6 +2026,7 @@ mod tests {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: RepoKind::Git,
         });
 
         let a = app.attention_label(0, "main");
@@ -2036,6 +2096,7 @@ mod tests {
                     base_ref: None,
                     copy_on_create: Vec::new(),
                     run: None,
+                    kind: RepoKind::Git,
                 }],
                 agent_cmd: "claude".to_string(),
                 notify: true,
@@ -2727,6 +2788,7 @@ mod tests {
             base_ref: None,
             copy_on_create: Vec::new(),
             run: None,
+            kind: RepoKind::Git,
         }
     }
 
@@ -3153,5 +3215,103 @@ mod tests {
         app.register_repository("");
 
         assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    // --- issue #102: plain (non-git) directory target ----------------------
+
+    /// A plain dir is modeled as one repo with a single synthetic worktree that
+    /// IS the directory. `refresh_worktrees` must never shell out to git for it.
+    #[test]
+    fn refresh_on_plain_repo_yields_one_synthetic_worktree_and_no_git() {
+        let dir = tempfile::tempdir().unwrap(); // NON-git directory
+        let repo = crate::repository::register(dir.path()).unwrap();
+        assert_eq!(repo.kind, RepoKind::Plain);
+
+        let config = Config {
+            repos: vec![repo],
+            ..Default::default()
+        };
+        let called = Arc::new(AtomicBool::new(false));
+        let mut app = App::with_provider(
+            config,
+            Arc::new(FlagProvider {
+                called: Arc::clone(&called),
+            }),
+        );
+
+        assert_eq!(app.worktrees.len(), 1, "exactly one synthetic worktree");
+        assert_eq!(app.worktree_repo, vec![0]);
+        assert_eq!(app.worktrees[0].path, dir.path().to_path_buf());
+        assert!(
+            app.worktrees[0].head.is_empty(),
+            "synthetic worktree carries no HEAD"
+        );
+        // The VCS provider must never run for a plain dir (no git/gh jobs).
+        assert!(
+            !drain_until(&mut app, |_| called.load(Ordering::SeqCst)),
+            "no git/gh status must be spawned for a plain dir"
+        );
+    }
+
+    /// Every git-only action gates off the single `is_git` predicate: on a
+    /// selected plain dir each is a no-op that only sets the status line — no
+    /// panic, no subprocess.
+    #[test]
+    fn git_only_actions_on_plain_repo_are_gated() {
+        let dir = tempfile::tempdir().unwrap(); // NON-git directory
+        let repo = crate::repository::register(dir.path()).unwrap();
+        let config = Config {
+            repos: vec![repo],
+            ..Default::default()
+        };
+        let mut app = App::with_provider(
+            config,
+            Arc::new(FakeProvider {
+                status: VcsStatus::default(),
+            }),
+        );
+        assert_eq!(app.selected_repo, Some(0));
+
+        app.add_worktree("feature");
+        assert_eq!(app.status.as_deref(), Some("not a git repository"));
+        assert_eq!(
+            app.worktrees.len(),
+            1,
+            "no worktree created beyond the synthetic one"
+        );
+
+        app.rename_branch("other");
+        assert_eq!(app.status.as_deref(), Some("not a git repository"));
+
+        app.pr_mark_ready();
+        assert_eq!(app.status.as_deref(), Some("not a git repository"));
+    }
+
+    /// A git repo is unchanged: real worktrees are listed via git.
+    #[test]
+    fn refresh_on_git_repo_lists_real_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        init_git_repo(&repo_path);
+        let repo = crate::repository::register(&repo_path).unwrap();
+        assert_eq!(repo.kind, RepoKind::Git);
+
+        let config = Config {
+            repos: vec![repo],
+            ..Default::default()
+        };
+        let app = App::with_provider(
+            config,
+            Arc::new(FakeProvider {
+                status: VcsStatus::default(),
+            }),
+        );
+
+        assert_eq!(app.worktrees.len(), 1);
+        assert_eq!(app.worktrees[0].path, repo_path);
+        assert!(
+            !app.worktrees[0].head.is_empty(),
+            "a real git worktree carries a HEAD"
+        );
     }
 }

@@ -137,6 +137,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::RepoKind;
 
     #[test]
     fn default_agent_cmd_is_claude() {
@@ -159,6 +160,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -227,6 +229,7 @@ mod tests {
                 base_ref: None,
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
             }],
             agent_cmd: "claude".to_string(),
             notify: true,
@@ -538,6 +541,7 @@ mod tests {
                 path: PathBuf::from("/home/user/demo"),
                 copy_on_create: Vec::new(),
                 run: None,
+                kind: RepoKind::Git,
                 ..Default::default()
             }],
             ..Default::default()
@@ -603,6 +607,7 @@ mod tests {
                 name: "demo".to_string(),
                 path: PathBuf::from("/home/user/demo"),
                 run: None,
+                kind: RepoKind::Git,
                 ..Default::default()
             }],
             ..Default::default()
@@ -636,5 +641,65 @@ mod tests {
         let loaded = Config::load_from(&populated_path).unwrap();
         assert_eq!(loaded, original);
         assert_eq!(loaded.repos[0].run.as_deref(), Some("pnpm dev"));
+    }
+
+    // --- issue #102: plain (non-git) directory target ----------------------
+    //
+    // Back-compat is fully additive: a git repo (the default kind) writes NO
+    // `kind` key, a legacy entry lacking `kind` loads as `Git`, and only a plain
+    // dir serializes `kind = "plain"` and round-trips.
+
+    #[test]
+    fn git_repo_omits_kind_and_legacy_entry_loads_as_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("git.toml");
+        Config {
+            repos: vec![Repository {
+                name: "demo".to_string(),
+                path: PathBuf::from("/home/user/demo"),
+                kind: RepoKind::Git,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_to(&path)
+        .unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !serialized.contains("kind"),
+            "a Git repo must omit `kind` via skip_serializing_if, got:\n{serialized}"
+        );
+
+        // A legacy entry written before #102 has no `kind` key -> Git.
+        let cfg: Config = toml::from_str(
+            "agent_cmd = \"claude\"\n[[repos]]\nname = \"demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.repos[0].kind, RepoKind::Git);
+    }
+
+    #[test]
+    fn plain_repo_serializes_and_round_trips_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.toml");
+        let original = Config {
+            repos: vec![Repository {
+                name: "notes".to_string(),
+                path: PathBuf::from("/home/user/notes"),
+                kind: RepoKind::Plain,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        original.save_to(&path).unwrap();
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            serialized.contains("kind = \"plain\""),
+            "a Plain dir must serialize `kind = \"plain\"`, got:\n{serialized}"
+        );
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.repos[0].kind, RepoKind::Plain);
     }
 }

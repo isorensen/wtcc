@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Register a plain (non-git) directory as an agent target**: pointing wtcc at a
+  directory without a `.git` entry no longer errors — it registers as a plain repo with a
+  single synthetic worktree (the directory itself), so you can run a Claude agent there
+  (e.g. a Drive-synced or orchestration-only folder). Git-only actions (add/remove worktree,
+  rename branch, PR open/ready/merge/close) are cleanly disabled with a `not a git
+  repository` status, and no `git`/`gh` is spawned for it. Existing git repos and legacy
+  configs are unaffected (the `kind` field defaults to git and is omitted when git). (#102)
 - **Switch repos from the keyboard**: `S` cycles to the next repo (expanding it if it
   was collapsed), so collapsed repos are reachable without the command palette or mouse.
   It complements free arrow navigation and mirrors `A` (switch agent). (#108)

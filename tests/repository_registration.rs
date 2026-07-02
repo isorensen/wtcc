@@ -91,7 +91,9 @@ fn register_invalid_path_sets_status_without_adding() {
 }
 
 #[test]
-fn register_non_git_directory_sets_status_without_adding() {
+fn register_non_git_directory_registers_as_a_plain_repo() {
+    // #102: a plain (non-git) dir is a valid target — registered as a repo with
+    // one synthetic worktree that IS the directory.
     let plain = tempfile::tempdir().expect("plain dir");
     let config_dir = tempfile::tempdir().expect("config tempdir");
     let config_path = config_dir.path().join("config.toml");
@@ -99,8 +101,13 @@ fn register_non_git_directory_sets_status_without_adding() {
     let mut app = app_with_temp_config(&config_path);
     app.register_repository(plain.path().to_str().unwrap());
 
-    assert!(app.config.repos.is_empty(), "non-git dir must not register");
-    assert!(app.status.is_some(), "status should report the failure");
+    assert_eq!(app.config.repos.len(), 1, "plain dir must register");
+    assert_eq!(
+        app.config.repos[0].kind,
+        wtcc::repository::RepoKind::Plain,
+        "a non-git dir registers as Plain"
+    );
+    assert!(!app.config.repos[0].is_git());
 }
 
 #[test]
