@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-02
+
 ### Changed
 - **Removing a worktree (`d`) now states plainly that it deletes the directory from disk**:
   the confirm prompt reads "Delete worktree directory from disk? … The branch and its
