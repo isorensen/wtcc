@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-02
+
 ### Added
 - **Install from crates.io**: `cargo install wtcc`. A tag-triggered `crates-publish` job in
   the release workflow runs `cargo publish --locked` after tests pass (gated on a
