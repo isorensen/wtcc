@@ -179,9 +179,24 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
         return;
     };
 
-    let bytes: Vec<u8> = match key.code {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let Some(bytes) = agent_key_bytes(key.code, ctrl, shift) else {
+        return;
+    };
+    let _ = session.write_input(&bytes);
+}
+
+/// Translates a key into the byte sequence forwarded to the agent's PTY.
+/// Returns `None` for keys that are not forwarded. Pure: no I/O, no state.
+///
+/// Shift+Tab is emitted as CSI Z (`\x1b[Z`) whether crossterm reports it as
+/// `BackTab` (legacy protocol) or `Tab` + SHIFT (Kitty keyboard protocol).
+fn agent_key_bytes(code: KeyCode, ctrl: bool, shift: bool) -> Option<Vec<u8>> {
+    let bytes = match code {
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Tab if shift => b"\x1b[Z".to_vec(),
         KeyCode::Tab => vec![b'\t'],
         KeyCode::Esc => vec![0x1b],
         KeyCode::Left => b"\x1b[D".to_vec(),
@@ -197,9 +212,9 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
             vec![(c.to_ascii_lowercase() as u8) & 0x1f]
         }
         KeyCode::Char(c) => c.to_string().into_bytes(),
-        _ => return,
+        _ => return None,
     };
-    let _ = session.write_input(&bytes);
+    Some(bytes)
 }
 
 fn handle_primary(app: &mut App, key: KeyEvent) {
@@ -1045,5 +1060,37 @@ mod tests {
         a.selected_worktree = Some(0);
         handle_scroll(&mut a, false, 1000);
         handle_scroll(&mut a, true, 1000);
+    }
+
+    #[test]
+    fn agent_key_bytes_backtab_is_csi_z() {
+        assert_eq!(
+            agent_key_bytes(KeyCode::BackTab, false, false),
+            Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn agent_key_bytes_shift_tab_is_csi_z() {
+        assert_eq!(
+            agent_key_bytes(KeyCode::Tab, false, true),
+            Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn agent_key_bytes_plain_tab_is_horizontal_tab() {
+        assert_eq!(
+            agent_key_bytes(KeyCode::Tab, false, false),
+            Some(vec![b'\t'])
+        );
+    }
+
+    #[test]
+    fn agent_key_bytes_enter_is_carriage_return() {
+        assert_eq!(
+            agent_key_bytes(KeyCode::Enter, false, false),
+            Some(vec![b'\r'])
+        );
     }
 }

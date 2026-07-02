@@ -976,6 +976,7 @@ impl App {
         }
         self.select_repo(self.config.repos.len() - 1);
         self.status = Some(format!("registered repo {name}"));
+        self.focus = Focus::Agent;
     }
 
     /// Unregisters the repository at `index` from the config. This only edits
@@ -2997,5 +2998,39 @@ mod tests {
                 .contains("directory missing"),
             "a missing selected-repo dir must hint even when the repo is collapsed"
         );
+    }
+
+    #[test]
+    fn register_repository_success_focuses_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_repo = dir.path().join("new-repo");
+        std::fs::create_dir(&new_repo).unwrap();
+        init_git_repo(&new_repo);
+        let config_path = dir.path().join("config.toml");
+        let mut app = app_with_two_repos(
+            PathBuf::from("/tmp/does-not-exist-a"),
+            PathBuf::from("/tmp/does-not-exist-b"),
+            config_path,
+        );
+        assert_eq!(app.focus, Focus::Sidebar);
+
+        app.register_repository(new_repo.to_str().unwrap());
+
+        assert_eq!(app.focus, Focus::Agent);
+    }
+
+    #[test]
+    fn register_repository_failure_keeps_focus() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let mut app = app_with_two_repos(
+            PathBuf::from("/tmp/does-not-exist-a"),
+            PathBuf::from("/tmp/does-not-exist-b"),
+            config_path,
+        );
+
+        app.register_repository("");
+
+        assert_eq!(app.focus, Focus::Sidebar);
     }
 }
