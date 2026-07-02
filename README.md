@@ -143,6 +143,20 @@ terminal's own native selection.
 - [`gh`](https://cli.github.com/) (GitHub CLI) — for PR/CI status
 - [`claude`](https://claude.com/claude-code) (Claude Code CLI) — the agent
 
+## Install
+
+From [crates.io](https://crates.io/crates/wtcc):
+
+```sh
+cargo install wtcc
+```
+
+On Arch Linux, from the [AUR](https://aur.archlinux.org/packages/wtcc):
+
+```sh
+paru -S wtcc   # or: yay -S wtcc
+```
+
 ## Build & run
 
 ```sh

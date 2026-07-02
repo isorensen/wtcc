@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Install from crates.io**: `cargo install wtcc`. A tag-triggered `crates-publish` job in
+  the release workflow runs `cargo publish --locked` after tests pass (gated on a
+  `CARGO_REGISTRY_TOKEN` secret; the tag/version match is verified first). (#79)
 - **Register a plain (non-git) directory as an agent target**: pointing wtcc at a
   directory without a `.git` entry no longer errors — it registers as a plain repo with a
   single synthetic worktree (the directory itself), so you can run a Claude agent there

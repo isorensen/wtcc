@@ -102,3 +102,35 @@ jobs:
           git add PKGBUILD .SRCINFO
           git commit -m "Update to ${{ steps.version.outputs.version }}"
           git push
+
+  # Publishes the crate to crates.io so users can `cargo install wtcc`.
+  # Required secret: CARGO_REGISTRY_TOKEN (a crates.io API token, ideally scoped to
+  # publish-new/publish-update for the `wtcc` crate with an expiry). It is only ever
+  # read by this tag-triggered job — never by pull_request runs, so fork PRs cannot
+  # reach it. `needs: build` gates publishing behind green tests, so a red tag never
+  # publishes. crates.io publishes are irreversible (yank-only), so the tag/version
+  # match is verified first.
+  crates-publish:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $ver"
+            exit 1
+          fi
+
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

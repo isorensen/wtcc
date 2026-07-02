@@ -26,3 +26,15 @@ CLIs. The most relevant risk classes are:
 ## Supported versions
 
 This project is pre-1.0; only the latest release on `main` is supported.
+
+## CI secrets
+
+Release automation in `.github/workflows/release.yml` reads two repository secrets, and
+**only** from jobs triggered by pushing a `v*` tag (which requires write access) — never
+from `pull_request` runs, so pull requests from forks can never reach them:
+
+- `AUR_SSH_PRIVATE_KEY` — ed25519 key used to push the updated PKGBUILD to the AUR.
+- `CARGO_REGISTRY_TOKEN` — crates.io API token used by the `crates-publish` job to run
+  `cargo publish`. Prefer a token scoped to `publish-new`/`publish-update` for the `wtcc`
+  crate with a short expiry; rotate it periodically. It is passed only via the job's
+  `env:` and is never echoed.
