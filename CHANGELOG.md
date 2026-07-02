@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Agent pane no longer hangs on a session whose directory was removed out-of-band**: if a
+  worktree's directory was deleted while wtcc had a tmux session there, `tmux new-session -A`
+  reattached to the dead session and the shell hung on `getcwd` (only the first keystroke
+  echoed). wtcc now pins each session's start dir (`tmux -c <worktree>`) and, before
+  reattaching, detects a session whose working directory is gone and recreates it cleanly.
+  A genuinely-missing worktree dir now shows the missing-dir hint instead of spawning a
+  broken shell. (#116)
+
 ## [0.9.0] - 2026-07-02
 
 ### Added

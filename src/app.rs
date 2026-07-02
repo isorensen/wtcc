@@ -753,6 +753,13 @@ impl App {
         };
         let branch = wt.branch.clone();
         let path = wt.path.clone();
+        // #116: a worktree dir removed out-of-band must NOT spawn a shell into a
+        // dead cwd. Clear the active session and bail so the #81 missing-dir hint
+        // shows instead of a broken pane. Present git dirs are unaffected.
+        if !path.exists() {
+            self.active_session = None;
+            return;
+        }
         // Composite (repo-qualified) key: the layout entry and the agent-command
         // lookup MUST use the same key the tab session names are built from (#89).
         let slug = self
@@ -2593,6 +2600,9 @@ mod tests {
         use portable_pty::CommandBuilder;
 
         let mut app = app_with_fake_worktrees(); // main selected
+        // The worktree dir must exist (#116 bails on a removed dir); the reused
+        // session is pre-seeded below, so cwd is otherwise irrelevant here.
+        app.worktrees[0].path = std::env::temp_dir();
         let agent = SessionManager::session_name(&app.worktree_key(0, "main"));
         let mut a = CommandBuilder::new("printf");
         a.args(["x"]);
@@ -2618,6 +2628,34 @@ mod tests {
             app.active_session.as_deref(),
             Some(agent.as_str()),
             "the active tab's session becomes active_session"
+        );
+    }
+
+    #[test]
+    fn ensure_active_session_skips_a_removed_worktree_dir() {
+        // #116: a worktree whose dir was removed out-of-band must not spawn a
+        // shell into a dead cwd — clear the active session and seed nothing, so
+        // the #81 missing-dir sidebar hint shows instead of a broken pane.
+        let mut app = app_with_fake_worktrees(); // main selected; /repo/main does not exist
+        assert!(
+            !app.worktrees[0].path.exists(),
+            "test premise: the fake worktree dir must be absent"
+        );
+        let agent = SessionManager::session_name(&app.worktree_key(0, "main"));
+
+        app.ensure_active_session(24, 80);
+
+        assert_eq!(
+            app.active_session, None,
+            "no session activates for a dead dir"
+        );
+        assert!(
+            app.session_manager.get(&agent).is_none(),
+            "no session is spawned for a removed worktree dir"
+        );
+        assert!(
+            !app.layouts.contains_key(&app.worktree_key(0, "main")),
+            "no layout is seeded when the dir is missing"
         );
     }
 
