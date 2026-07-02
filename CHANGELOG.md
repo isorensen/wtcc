@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Focus jumps to the agent pane after registering a repo**: submitting the "add repo"
+  prompt (`a` → path → Enter) now moves focus to the agent pane on success, so the next
+  keystrokes reach the agent instead of firing sidebar shortcuts (`d`, `a`, `x`). A failed
+  registration (bad/empty path, duplicate, save error) keeps focus on the sidebar. (#104)
+
+### Fixed
+- **Shift+Tab is now forwarded to the agent pane**: the agent PTY receives the standard
+  back-tab sequence (`ESC [ Z`) so Claude Code's mode toggle works. Handled whether the
+  terminal reports Shift+Tab as `BackTab` (legacy) or `Tab` + SHIFT (Kitty keyboard
+  protocol, e.g. ghostty); plain Tab still sends `\t`. (#105)
+
 ## [0.8.7] - 2026-07-02
 
 ### Changed
