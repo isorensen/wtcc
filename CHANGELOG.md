@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-07-02
+
+### Changed
+- **Attention notifications now name the repo**: the "agent needs your input" desktop
+  notification reads `Agent for <repo> / <branch> needs your input` instead of just the
+  branch, so with several repos expanded a same-named branch (e.g. two `main`s) is no
+  longer ambiguous. Display-only — the internal composite/hash session key is never shown (#99).
+
 ## [0.8.6] - 2026-07-01
 
 ### Fixed
