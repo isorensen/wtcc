@@ -98,7 +98,9 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` (or arrows) | Move selection |
+| `j` / `k` (or arrows) | Move selection (freely across every expanded repo's worktrees) |
+| `Space` / `Enter` | Expand / collapse the selected repo |
+| `S` | Switch to the next repo (also expands it if collapsed) |
 | `Tab` | Focus the agent pane |
 | `a` | Register a repository |
 | `D` | Unregister the selected repository (config only; nothing on disk is deleted) |

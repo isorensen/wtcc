@@ -259,6 +259,12 @@ pub static PRIMARY: &[Binding] = &[
         chords: &[Chord::key(KeyCode::Char('A'))],
         action: Action::SwitchAgent,
     },
+    // Switch to the next repo (#108). `s` is RunScript; uppercase `S` is free and
+    // `Chord::matches` keeps the two distinct.
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('S'))],
+        action: Action::SwitchRepo,
+    },
     Binding {
         chords: &[Chord::key(KeyCode::Char('g'))],
         action: Action::JumpAttention,
@@ -407,6 +413,24 @@ mod tests {
         assert_eq!(
             dispatch(PRIMARY, ev(KeyCode::Char('D'), KeyModifiers::SHIFT)),
             Some(Action::RemoveRepo)
+        );
+    }
+
+    #[test]
+    fn switch_repo_binds_to_uppercase_s_distinct_from_run_script() {
+        // #108: `S` switches repo; `s` stays RunScript (case must not collapse).
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('S'), KeyModifiers::NONE)),
+            Some(Action::SwitchRepo)
+        );
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('S'), KeyModifiers::SHIFT)),
+            Some(Action::SwitchRepo),
+            "Shift+S must still fire under the Kitty protocol"
+        );
+        assert_eq!(
+            dispatch(PRIMARY, ev(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(Action::RunScript)
         );
     }
 
