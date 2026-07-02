@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-use crate::app::{App, Confirm, Focus, Overlay, Prompt};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection};
 
 const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a repository";
 pub(crate) const SIDEBAR_WIDTH: u16 = 34;
@@ -109,6 +109,39 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true })
                 .render(surface_area, buf);
+        }
+    }
+
+    // Overlay the drag-selection highlight on top of whatever the surface drew
+    // (issue #103). We deliberately do NOT clear the selection on new PTY output:
+    // the agent is a redraw-heavy TUI, so the highlight is cleared on the next
+    // keypress instead (same rationale as the scrollback view in #106).
+    if let Some(sel) = app.selection {
+        overlay_selection(sel, area, buf);
+    }
+}
+
+/// Reverses the styling of the cells covered by `sel` on the agent surface.
+/// `area` is the agent pane rect (bordered block), so the surface's top-left is
+/// `(area.x + 1, area.y + 1 + TAB_BAR_HEIGHT)`. Bounds-guarded via `cell_mut`:
+/// cells outside the buffer are skipped, so it never panics.
+fn overlay_selection(sel: Selection, area: Rect, buf: &mut Buffer) {
+    let cols = area.width.saturating_sub(2);
+    let x0 = area.x + 1;
+    let y0 = area.y + 1 + TAB_BAR_HEIGHT;
+    let (start, end) = sel.normalized();
+    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    for r in start.0..=end.0 {
+        let c0 = if r == start.0 { start.1 } else { 0 };
+        let c1 = if r == end.0 {
+            end.1
+        } else {
+            cols.saturating_sub(1)
+        };
+        for c in c0..=c1 {
+            if let Some(cell) = buf.cell_mut((x0 + c, y0 + r)) {
+                cell.set_style(reversed);
+            }
         }
     }
 }
@@ -591,6 +624,37 @@ mod tests {
             buffer[(active_x, strip_y)].style(),
             buffer[(inactive_x, strip_y)].style(),
             "the active tab title must be highlighted differently from inactive titles"
+        );
+    }
+
+    // --- issue #103: drag-selection overlay ---------------------------------
+
+    #[test]
+    fn selection_reverses_the_selected_surface_cells() {
+        let mut app = app_for_render();
+        app.selection = Some(Selection {
+            anchor: (0, 0),
+            cursor: (0, 2),
+        });
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Surface top-left in the full frame: sidebar + left border, then the
+        // top border + tab strip.
+        let x0 = SIDEBAR_WIDTH + 1;
+        let y0 = 1 + TAB_BAR_HEIGHT;
+        for c in 0..=2u16 {
+            assert!(
+                buffer[(x0 + c, y0)].modifier.contains(Modifier::REVERSED),
+                "selected cell at col {c} must be reversed"
+            );
+        }
+        assert!(
+            !buffer[(x0 + 3, y0)].modifier.contains(Modifier::REVERSED),
+            "the cell just past the selection must not be reversed"
         );
     }
 }

@@ -17,6 +17,27 @@ pub enum Focus {
     Agent,
 }
 
+/// An in-progress or completed drag-selection over the agent surface. Both points
+/// are `(grid_row, grid_col)` cells in the terminal surface (0-based, honoring
+/// scrollback via the visible grid). `anchor` is where the drag began; `cursor`
+/// tracks the pointer. A selection with `anchor == cursor` is a bare click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (u16, u16),
+    pub cursor: (u16, u16),
+}
+
+impl Selection {
+    /// The two endpoints ordered so `start <= end` by (row, col).
+    pub fn normalized(&self) -> ((u16, u16), (u16, u16)) {
+        if self.anchor <= self.cursor {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
 /// How long an ARCHIVE script may run before it is killed so worktree removal can
 /// proceed. A crude bound: the run is synchronous, so this caps how long a
 /// hanging user script can freeze the UI.
@@ -159,6 +180,14 @@ pub struct App {
     /// jump_to_attention).
     pub selected_worktree: Option<usize>,
     pub focus: Focus,
+    /// Active drag-selection over the agent surface, if any. Set on mouse-down in
+    /// the surface, extended on drag, and kept after copy so the highlight
+    /// persists until the next keypress clears it. `None` when nothing is selected.
+    pub selection: Option<Selection>,
+    /// OSC 52 clipboard sequence produced by the last completed drag-copy, waiting
+    /// to be written to the host terminal by the run loop. Drained (taken) once per
+    /// frame; the handlers stay pure by never touching stdout themselves.
+    pub pending_clipboard: Option<String>,
     /// In-memory UI toggle: when `true`, archived worktrees are shown in the
     /// sidebar. Defaults to `false`; not persisted (the `archived` markers are).
     pub show_archived: bool,
@@ -262,6 +291,8 @@ impl App {
             worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            selection: None,
+            pending_clipboard: None,
             show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
@@ -1340,6 +1371,21 @@ mod tests {
         false
     }
 
+    #[test]
+    fn selection_normalized_orders_endpoints_by_row_then_col() {
+        let forward = Selection {
+            anchor: (0, 1),
+            cursor: (2, 3),
+        };
+        assert_eq!(forward.normalized(), ((0, 1), (2, 3)));
+        // Reversed drag (cursor above/left of anchor) still yields start <= end.
+        let reversed = Selection {
+            anchor: (2, 3),
+            cursor: (0, 1),
+        };
+        assert_eq!(reversed.normalized(), ((0, 1), (2, 3)));
+    }
+
     fn config_with_repo() -> Config {
         Config {
             repos: vec![Repository {
@@ -1386,6 +1432,8 @@ mod tests {
             worktree_repo: vec![0, 0],
             selected_worktree: Some(0),
             focus: Focus::Sidebar,
+            selection: None,
+            pending_clipboard: None,
             show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
@@ -1657,6 +1705,8 @@ mod tests {
             worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            selection: None,
+            pending_clipboard: None,
             show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,
@@ -1998,6 +2048,8 @@ mod tests {
             worktree_repo: Vec::new(),
             selected_worktree: None,
             focus: Focus::Sidebar,
+            selection: None,
+            pending_clipboard: None,
             show_archived: false,
             theme: Theme::default(),
             overlay: Overlay::None,

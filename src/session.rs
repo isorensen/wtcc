@@ -8,6 +8,11 @@ use std::time::{Duration, Instant};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use vt100::Parser;
 
+/// Retained scrollback lines per agent PTY, enabling mouse-wheel scrollback
+/// (#106). The agent is a full-screen TUI that redraws continuously, so we keep
+/// a generous buffer and only ever snap back to the live bottom on a keypress.
+const SCROLLBACK_LINES: usize = 5000;
+
 /// A worktree's agent gets one of three states, derived purely from how
 /// recently its PTY produced output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +233,7 @@ impl Session {
 
         let mut reader_handle = pty.master.try_clone_reader()?;
         let writer = pty.master.take_writer()?;
-        let parser = Arc::new(Mutex::new(Parser::new(rows, cols, 0)));
+        let parser = Arc::new(Mutex::new(Parser::new(rows, cols, SCROLLBACK_LINES)));
         let last_activity = Arc::new(Mutex::new(Instant::now()));
 
         let parser_clone = Arc::clone(&parser);
@@ -261,6 +266,25 @@ impl Session {
         writer.write_all(bytes)?;
         writer.flush()?;
         Ok(())
+    }
+
+    /// Scrolls the view back by `delta` rows (clamped to available history).
+    pub fn scroll_up(&self, delta: usize) {
+        let mut p = self.parser.lock().unwrap();
+        let cur = p.screen().scrollback();
+        p.screen_mut().set_scrollback(cur.saturating_add(delta));
+    }
+
+    /// Scrolls the view toward the live bottom by `delta` rows.
+    pub fn scroll_down(&self, delta: usize) {
+        let mut p = self.parser.lock().unwrap();
+        let cur = p.screen().scrollback();
+        p.screen_mut().set_scrollback(cur.saturating_sub(delta));
+    }
+
+    /// Snaps the view back to the live bottom (offset 0).
+    pub fn scroll_to_bottom(&self) {
+        self.parser.lock().unwrap().screen_mut().set_scrollback(0);
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
@@ -496,6 +520,57 @@ mod tests {
                 .screen()
                 .contents()
                 .contains("wtcc-pty-ok")
+        );
+    }
+
+    // --- issue #106: mouse-wheel scrollback ---------------------------------
+    //
+    // On a screen smaller than the output, the latest lines are visible at the
+    // live bottom (offset 0). Scrolling up reveals earlier lines the screen had
+    // scrolled off; snapping to bottom returns to the live latest line.
+    #[test]
+    fn scroll_up_reveals_history_and_bottom_snaps_back() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        let session = Session::spawn_with_command(cmd, &std::env::temp_dir(), 5, 20).unwrap();
+
+        // Wait until the last line is on the live screen.
+        for _ in 0..40 {
+            if session
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("60")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let visible = |s: &Session| s.parser().lock().unwrap().screen().contents();
+        let offset = |s: &Session| s.parser().lock().unwrap().screen().scrollback();
+
+        assert_eq!(offset(&session), 0, "starts at the live bottom");
+        assert!(visible(&session).contains("60"), "latest line is visible");
+
+        session.scroll_up(10);
+        assert!(offset(&session) > 0, "scrolling up leaves the live bottom");
+        assert!(
+            visible(&session).contains("50"),
+            "an earlier line that was scrolled off is now visible"
+        );
+        assert!(
+            !visible(&session).contains("60"),
+            "the latest line is no longer on screen after scrolling up"
+        );
+
+        session.scroll_to_bottom();
+        assert_eq!(offset(&session), 0, "snaps back to the live bottom");
+        assert!(
+            visible(&session).contains("60"),
+            "latest line is visible again"
         );
     }
 
