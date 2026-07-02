@@ -2911,8 +2911,7 @@ mod tests {
         let nav = app.navigable_worktrees();
         let last_a = *nav
             .iter()
-            .filter(|&&i| app.worktree_repo[i] == 0)
-            .next_back()
+            .rfind(|&&i| app.worktree_repo[i] == 0)
             .expect("repo A has a visible worktree");
         app.selected_worktree = Some(last_a);
         app.selected_repo = Some(0);
