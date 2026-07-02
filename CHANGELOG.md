@@ -6,7 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Switch repos from the keyboard**: `S` cycles to the next repo (expanding it if it
+  was collapsed), so collapsed repos are reachable without the command palette or mouse.
+  It complements free arrow navigation and mirrors `A` (switch agent). (#108)
+
 ### Changed
+- **All repos start expanded on launch**: every registered repo now shows its
+  worktrees/branches immediately, instead of only the first repo being expanded. The
+  first repo (index 0) is still the selected/active one; runtime expand/collapse is
+  unchanged. (#107)
+- **Arrow keys navigate freely across repos**: `j`/`k` / Up/Down now move continuously
+  through the worktrees of *all expanded repos* in sidebar order; crossing a repo
+  boundary makes that repo active (the selection↔repo invariant is preserved).
+  Archived-hidden worktrees are still skipped. (#108)
 - **Focus jumps to the agent pane after registering a repo**: submitting the "add repo"
   prompt (`a` → path → Enter) now moves focus to the agent pane on success, so the next
   keystrokes reach the agent instead of firing sidebar shortcuts (`d`, `a`, `x`). A failed

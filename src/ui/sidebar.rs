@@ -554,7 +554,10 @@ mod tests {
             merge_strategy: crate::pr::MergeStrategy::default(),
             ..Default::default()
         });
-        // App::new expands repo 0 only; repo 1 stays collapsed.
+        // App::new now expands every repo (#107); collapse repo 1 so both the
+        // open and closed glyphs are exercised.
+        app.expanded_repos
+            .remove(&PathBuf::from("/tmp/wtcc-exp-b-none"));
         app.focus = Focus::Agent;
         let area = Rect::new(0, 0, 20, 8);
         let mut buf = Buffer::empty(area);

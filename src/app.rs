@@ -250,12 +250,10 @@ impl App {
     /// error handling without spawning `git`/`gh`.
     pub(crate) fn with_provider(config: Config, vcs_provider: Arc<dyn VcsProvider>) -> App {
         let selected_repo = (!config.repos.is_empty()).then_some(0);
-        // The first repo starts expanded so the initial view matches today's
-        // behavior (its worktrees are shown on launch).
-        let mut expanded_repos = std::collections::HashSet::new();
-        if let Some(i) = selected_repo {
-            expanded_repos.insert(config.repos[i].path.clone());
-        }
+        // All repos start expanded so every repo's worktrees are visible on
+        // launch (#107); an empty config yields an empty set.
+        let expanded_repos: std::collections::HashSet<PathBuf> =
+            config.repos.iter().map(|r| r.path.clone()).collect();
         let mut app = App {
             config,
             selected_repo,
@@ -514,17 +512,13 @@ impl App {
     }
 
     /// Worktree indices that keyboard navigation may land on, in display order.
-    /// Only the ACTIVE repo's worktrees are navigable, so j/k cycle within the
-    /// selected repo even when several repos are expanded. When `show_archived`
-    /// is false that repo's archived (soft-hidden) worktrees are skipped, keyed
-    /// off THAT worktree's own repo `archived` set. Hidden/other-repo rows are
-    /// treated as non-existent for selection.
+    /// Every expanded repo's visible worktrees are navigable, so j/k cycle
+    /// freely across repo boundaries (#108); the active repo follows the cursor.
+    /// When `show_archived` is false a worktree's archived (soft-hidden) rows are
+    /// skipped, keyed off THAT worktree's own repo `archived` set. Hidden rows
+    /// are treated as non-existent for selection.
     fn navigable_worktrees(&self) -> Vec<usize> {
-        let Some(selected) = self.selected_repo else {
-            return Vec::new();
-        };
         (0..self.worktrees.len())
-            .filter(|&i| self.worktree_repo.get(i).copied() == Some(selected))
             .filter(|&i| {
                 if self.show_archived {
                     return true;
@@ -550,6 +544,8 @@ impl App {
             .and_then(|cur| nav.iter().position(|&i| i == cur))
             .map_or(first, |pos| nav[(pos + 1) % nav.len()]);
         self.selected_worktree = Some(next);
+        // The cursor may cross a repo boundary; activate its repo (#108).
+        self.selected_repo = Some(self.worktree_repo[next]);
     }
 
     fn prev_worktree(&mut self) {
@@ -562,6 +558,8 @@ impl App {
             .and_then(|cur| nav.iter().position(|&i| i == cur))
             .map_or(first, |pos| nav[(pos + nav.len() - 1) % nav.len()]);
         self.selected_worktree = Some(prev);
+        // The cursor may cross a repo boundary; activate its repo (#108).
+        self.selected_repo = Some(self.worktree_repo[prev]);
     }
 
     /// If the current selection points at a worktree that is no longer
@@ -585,6 +583,8 @@ impl App {
             .or_else(|| nav.iter().copied().rev().find(|&i| i < cur))
         {
             self.selected_worktree = Some(target);
+            // The nearest visible row may live in another repo; follow it (#108).
+            self.selected_repo = Some(self.worktree_repo[target]);
         }
     }
 
@@ -2767,6 +2767,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_registered_repo_starts_expanded() {
+        // #107: all repos expand on launch; selection still lands on repo 0.
+        let config = Config {
+            repos: vec![
+                repo_entry("a", PathBuf::from("/tmp/wtcc-nope-a")),
+                repo_entry("b", PathBuf::from("/tmp/wtcc-nope-b")),
+                repo_entry("c", PathBuf::from("/tmp/wtcc-nope-c")),
+            ],
+            agent_cmd: "claude".to_string(),
+            notify: true,
+            merge_strategy: crate::pr::MergeStrategy::default(),
+            ..Default::default()
+        };
+        let n = config.repos.len();
+        let paths: Vec<PathBuf> = config.repos.iter().map(|r| r.path.clone()).collect();
+
+        let app = App::with_provider(
+            config,
+            Arc::new(FakeProvider {
+                status: VcsStatus::default(),
+            }),
+        );
+
+        assert_eq!(app.expanded_repos.len(), n, "every registered repo expands");
+        for p in &paths {
+            assert!(app.expanded_repos.contains(p), "{p:?} must be expanded");
+        }
+        assert_eq!(
+            app.selected_repo,
+            Some(0),
+            "selection still lands on repo 0"
+        );
+    }
+
     /// Two real git repos, both registered and EXPANDED, selection on repo 0.
     fn app_two_expanded_repos(repo_a: PathBuf, repo_b: PathBuf) -> App {
         let config = Config {
@@ -2834,7 +2869,7 @@ mod tests {
     }
 
     #[test]
-    fn navigable_worktrees_are_limited_to_the_selected_repo() {
+    fn navigable_worktrees_span_all_expanded_repos() {
         let dir = tempfile::tempdir().unwrap();
         let repo_a = dir.path().join("a");
         let repo_b = dir.path().join("b");
@@ -2846,18 +2881,53 @@ mod tests {
         let app = app_two_expanded_repos(repo_a, repo_b);
 
         let nav = app.navigable_worktrees();
+        // Free vertical nav (#108): every expanded repo's visible worktree is
+        // navigable, not just the active repo's.
         assert!(
-            nav.iter().all(|&i| app.worktree_repo[i] == 0),
-            "j/k must cycle only within the ACTIVE repo"
+            nav.iter().any(|&i| app.worktree_repo[i] == 0),
+            "repo A's worktrees are navigable"
+        );
+        assert!(
+            nav.iter().any(|&i| app.worktree_repo[i] == 1),
+            "repo B's worktrees are navigable too"
         );
         assert_eq!(
             nav.len(),
-            app.worktree_repo.iter().filter(|&&ri| ri == 0).count(),
-            "every one of the active repo's visible worktrees is navigable"
+            app.worktrees.len(),
+            "every visible worktree across expanded repos is navigable"
         );
-        assert!(
-            app.worktree_repo.contains(&1),
-            "repo B is still expanded/listed, just not navigable"
+    }
+
+    #[test]
+    fn next_worktree_crosses_repo_boundary_and_follows_the_active_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("a");
+        let repo_b = dir.path().join("b");
+        init_git_repo(&repo_a);
+        init_git_repo(&repo_b);
+        let mut app = app_two_expanded_repos(repo_a, repo_b);
+
+        // Land on repo A's last visible worktree, then advance across the border.
+        let nav = app.navigable_worktrees();
+        let last_a = *nav
+            .iter()
+            .filter(|&&i| app.worktree_repo[i] == 0)
+            .next_back()
+            .expect("repo A has a visible worktree");
+        app.selected_worktree = Some(last_a);
+        app.selected_repo = Some(0);
+
+        app.next_worktree();
+
+        let sel = app.selected_worktree.expect("selection advanced");
+        assert_eq!(
+            app.worktree_repo[sel], 1,
+            "advancing past repo A's last worktree lands on a repo B worktree"
+        );
+        assert_eq!(
+            app.selected_repo,
+            Some(1),
+            "the active repo follows the cursor across the boundary (#108)"
         );
     }
 
