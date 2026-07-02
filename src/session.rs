@@ -48,20 +48,25 @@ pub fn run_session_name(branch: &str) -> String {
     format!("wtcc-run-{}", crate::worktree::slugify(branch))
 }
 
-/// Builds the tmux argv for a Run tab: `new-session -A -s <name> <command>`.
+/// Builds the tmux argv for a Run tab: `new-session -A -s <name> -c <cwd> <command>`.
 /// SECURITY/CORRECTNESS: the user-authored `command` is the SINGLE, un-interpolated
 /// trailing element — tmux hands it to `$SHELL -c "<command>"`, so the shell (not
 /// wtcc) parses it. We deliberately do NOT add our own `sh -c` wrapper: tmux joins
 /// trailing positional args with spaces, so `["sh","-c",command]` would collapse to
 /// `sh -c <command>`, the outer `$SHELL -c` would word-split it, and the inner `sh`
 /// would run only the first word (e.g. `pnpm dev` → just `pnpm`). One trailing
-/// element keeps the whole command intact. No slug/branch/path is concatenated in.
-pub fn run_argv(name: &str, command: &str) -> Vec<String> {
+/// element keeps the whole command intact. `-c <cwd>` pins the start dir for a
+/// FRESH create; tmux ignores it when `-A` reattaches, so the reattach-to-a-dead-cwd
+/// case (#116) is handled by `reap_if_cwd_missing`, not `-c`. `-c` is kept as
+/// belt-and-suspenders for the create path. No slug/branch/path is concatenated in.
+pub fn run_argv(name: &str, command: &str, cwd: &Path) -> Vec<String> {
     vec![
         "new-session".to_string(),
         "-A".to_string(),
         "-s".to_string(),
         name.to_string(),
+        "-c".to_string(),
+        cwd.to_string_lossy().into_owned(),
         command.to_string(),
     ]
 }
@@ -71,23 +76,111 @@ pub fn run_argv(name: &str, command: &str) -> Vec<String> {
 /// login shell in the same PTY/cwd so the agent tab never dies as `[exited]`.
 const AGENT_FALLBACK_SCRIPT: &str = r#""$0" "$@"; exec "${SHELL:-/bin/sh}""#;
 
-/// argv for the AGENT surface: `new-session -A -s <name> sh -c <script> <agent-tokens...>`.
+/// argv for the AGENT surface: `new-session -A -s <name> -c <cwd> sh -c <script> <agent-tokens...>`.
 /// The agent command is whitespace-split into DISCRETE trailing positional params
 /// (`$0`, `$@`), never interpolated into the script string — same argv the agent
 /// got before, now with a shell fallback on exit. tmux execs the multi-arg command
-/// vector directly (no extra word-splitting).
-pub fn agent_argv(session_name: &str, command: &str) -> Vec<String> {
+/// vector directly (no extra word-splitting). `-c <cwd>` pins the start dir for a
+/// FRESH create; tmux ignores it when `-A` reattaches, so the reattach-to-a-dead-cwd
+/// case (#116) is handled by `reap_if_cwd_missing`, not `-c` (kept belt-and-suspenders).
+pub fn agent_argv(session_name: &str, command: &str, cwd: &Path) -> Vec<String> {
     let mut argv = vec![
         "new-session".to_string(),
         "-A".to_string(),
         "-s".to_string(),
         session_name.to_string(),
+        "-c".to_string(),
+        cwd.to_string_lossy().into_owned(),
         "sh".to_string(),
         "-c".to_string(),
         AGENT_FALLBACK_SCRIPT.to_string(),
     ];
     argv.extend(command.split_whitespace().map(str::to_string));
     argv
+}
+
+/// Decides whether a tmux `#{pane_current_path}` value points at a directory that
+/// no longer exists. tmux reports a removed cwd as the original path with a
+/// literal `" (deleted)"` suffix (it readlinks `/proc/<pid>/cwd`), which never
+/// matches a real path — so that form is correctly treated as missing. An empty
+/// value (query returned nothing) is treated as present: there is nothing to reap.
+///
+/// Only a `NotFound` stat is treated as missing. `Path::exists()` collapses EVERY
+/// `metadata` error (a transient permission flip, a stale NFS/SSHFS handle) to
+/// `false`, which would reap — and thus kill — a perfectly HEALTHY session on a
+/// blip. We narrow to `ErrorKind::NotFound`, the only kind that means the dir is
+/// genuinely gone (this still flags tmux's `<path> (deleted)` marker, which stats
+/// as NotFound).
+fn cwd_is_missing(pane_path: &str) -> bool {
+    let p = pane_path.trim();
+    if p.is_empty() {
+        return false;
+    }
+    matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// If a tmux session named `name` already exists but its working directory was
+/// removed out-of-band, kill it so the subsequent `new-session -A` creates a
+/// fresh session in a valid cwd instead of reattaching to a dead shell.
+///
+/// This — NOT the `-c <cwd>` flag — is what rescues a poisoned session: tmux
+/// ignores `-c` when `-A` reattaches to a pre-existing session, so the start dir
+/// can only be re-pinned by killing the session and letting the next
+/// `new-session` create it afresh (#116).
+///
+/// Returns `true` when it actually killed a session. Callers use that signal to
+/// tolerate a post-reap spawn race: reaping the server's LAST session tears the
+/// server down asynchronously, so the immediate recreate may need a retry.
+/// Best-effort: tmux/query errors are ignored (nothing to reap => `false`).
+fn reap_if_cwd_missing(name: &str) -> bool {
+    let out = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            name,
+            "-F",
+            "#{pane_current_path}",
+        ])
+        .output();
+    if let Ok(o) = out
+        && o.status.success()
+        && cwd_is_missing(&String::from_utf8_lossy(&o.stdout))
+    {
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", name])
+            .output();
+        return true;
+    }
+    false
+}
+
+/// Runs `attempt` to spawn a session, retrying only when a reap just happened.
+///
+/// A reap that emptied the tmux server triggers an asynchronous server teardown
+/// (`exit-empty on`); an immediate `new-session` can race the dying server and
+/// fail with `server exited unexpectedly`. When `reaped` is true we retry a few
+/// times with a short backoff to let the server settle. When `reaped` is false a
+/// spawn failure is real and surfaces immediately — no sleep on the happy path.
+fn spawn_after_reap<T, F>(reaped: bool, mut attempt: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> anyhow::Result<T>,
+{
+    match attempt() {
+        Ok(s) => Ok(s),
+        Err(e) if reaped => {
+            let mut last = e;
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(80));
+                match attempt() {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last = e,
+                }
+            }
+            Err(last)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Classifies a session's activity from how long it has been idle. `None` input
@@ -204,11 +297,22 @@ impl Session {
     ) -> anyhow::Result<Session> {
         let mut cmd = CommandBuilder::new("tmux");
         if let Some(command) = command {
-            for arg in agent_argv(session_name, command) {
+            for arg in agent_argv(session_name, command, cwd) {
                 cmd.arg(arg);
             }
         } else {
-            cmd.args(["new-session", "-A", "-s", session_name]);
+            // `-c <cwd>` pins the start dir only for a fresh create; on an `-A`
+            // reattach tmux ignores it, so a dead-cwd session is rescued by
+            // `reap_if_cwd_missing` upstream, not this flag (#116).
+            let cwd_str = cwd.to_string_lossy();
+            cmd.args([
+                "new-session",
+                "-A",
+                "-s",
+                session_name,
+                "-c",
+                cwd_str.as_ref(),
+            ]);
         }
         Self::spawn_with_command(cmd, cwd, rows, cols)
     }
@@ -375,7 +479,8 @@ impl SessionManager {
         cols: u16,
     ) -> anyhow::Result<&Session> {
         if !self.sessions.contains_key(name) {
-            let s = Session::spawn(name, command, cwd, rows, cols)?;
+            let reaped = reap_if_cwd_missing(name);
+            let s = spawn_after_reap(reaped, || Session::spawn(name, command, cwd, rows, cols))?;
             self.sessions.insert(name.to_string(), s);
         }
         Ok(self.sessions.get(name).unwrap())
@@ -396,11 +501,14 @@ impl SessionManager {
         cols: u16,
     ) -> anyhow::Result<&Session> {
         if !self.sessions.contains_key(name) {
-            let mut cmd = CommandBuilder::new("tmux");
-            for arg in run_argv(name, command) {
-                cmd.arg(arg);
-            }
-            let session = Session::spawn_with_command(cmd, cwd, rows, cols)?;
+            let reaped = reap_if_cwd_missing(name);
+            let session = spawn_after_reap(reaped, || {
+                let mut cmd = CommandBuilder::new("tmux");
+                for arg in run_argv(name, command, cwd) {
+                    cmd.arg(arg);
+                }
+                Session::spawn_with_command(cmd, cwd, rows, cols)
+            })?;
             self.sessions.insert(name.to_string(), session);
         }
         Ok(self.sessions.get(name).unwrap())
@@ -956,7 +1064,7 @@ mod tests {
         // run only the first word (`pnpm dev` → `pnpm`).
         let name = "wtcc-run-demo";
         let cmd = "pnpm dev && echo done";
-        let argv = run_argv(name, cmd);
+        let argv = run_argv(name, cmd, Path::new("/w/t"));
         assert_eq!(
             argv,
             vec![
@@ -964,6 +1072,8 @@ mod tests {
                 "-A".to_string(),
                 "-s".to_string(),
                 name.to_string(),
+                "-c".to_string(),
+                "/w/t".to_string(),
                 cmd.to_string(),
             ]
         );
@@ -972,9 +1082,16 @@ mod tests {
             Some(cmd),
             "the multi-word command is one un-split, un-interpolated trailing element"
         );
+        // The only `-c` is the tmux start-dir flag (`-c <cwd>`); there is NO `sh -c`
+        // wrapper of our own, which tmux would join and the outer shell word-split.
         assert!(
-            !argv.iter().any(|a| a == "sh" || a == "-c"),
-            "no sh/-c wrapper: tmux would join it and the outer shell would word-split"
+            !argv.iter().any(|a| a == "sh"),
+            "no sh wrapper: tmux would join it and the outer shell would word-split"
+        );
+        assert_eq!(
+            argv.iter().filter(|a| a.as_str() == "-c").count(),
+            1,
+            "the sole `-c` is the tmux start-dir flag, not a shell wrapper"
         );
     }
 
@@ -990,7 +1107,7 @@ mod tests {
 
     #[test]
     fn agent_argv_wraps_the_command_in_a_shell_fallback() {
-        let argv = agent_argv("wtcc-main", "claude --flag");
+        let argv = agent_argv("wtcc-main", "claude --flag", Path::new("/w/t"));
         assert_eq!(
             argv,
             vec![
@@ -998,6 +1115,8 @@ mod tests {
                 "-A".to_string(),
                 "-s".to_string(),
                 "wtcc-main".to_string(),
+                "-c".to_string(),
+                "/w/t".to_string(),
                 "sh".to_string(),
                 "-c".to_string(),
                 AGENT_FALLBACK_SCRIPT.to_string(),
@@ -1020,7 +1139,14 @@ mod tests {
 
     #[test]
     fn agent_argv_single_token_agent() {
-        let argv = agent_argv("wtcc-x", "claude");
+        let argv = agent_argv("wtcc-x", "claude", Path::new("/w/t"));
+        // The start dir is pinned right after the session name (#116).
+        let name_pos = argv.iter().position(|a| a == "wtcc-x").unwrap();
+        assert_eq!(
+            &argv[name_pos + 1..name_pos + 3],
+            &["-c".to_string(), "/w/t".to_string()],
+            "`-c <cwd>` follows the session name"
+        );
         // Exactly one trailing agent token after the fixed script.
         assert_eq!(argv.last().map(String::as_str), Some("claude"));
         let script_pos = argv
@@ -1031,6 +1157,195 @@ mod tests {
             &argv[script_pos + 1..],
             &["claude".to_string()],
             "single-token agent is one trailing param after the script"
+        );
+    }
+
+    // --- issue #116: reattaching to a session whose cwd vanished ------------
+
+    #[test]
+    fn cwd_is_missing_flags_removed_dirs_including_the_deleted_marker() {
+        // A present dir is fine; an empty query result is "nothing to reap".
+        assert!(!cwd_is_missing(&std::env::temp_dir().to_string_lossy()));
+        assert!(!cwd_is_missing(""));
+        assert!(!cwd_is_missing("   "));
+        // A path that EXISTS but resolves via a non-NotFound stat must NOT be
+        // flagged: only `ErrorKind::NotFound` means the dir is gone. A live file
+        // stats Ok(_) => present. (We can't portably force PermissionDenied here;
+        // the point is that anything other than NotFound => not missing.)
+        let live_file = std::env::temp_dir().join(format!("wtcc-cwd-live-{}", std::process::id()));
+        std::fs::write(&live_file, b"x").unwrap();
+        assert!(
+            !cwd_is_missing(&live_file.to_string_lossy()),
+            "an existing path (Ok stat) is present, never reaped"
+        );
+        let _ = std::fs::remove_file(&live_file);
+        // A path that does not exist counts as missing — and so does tmux's
+        // `<path> (deleted)` marker, which it emits for a removed pane cwd (it
+        // readlinks `/proc/<pid>/cwd`). That marker never resolves to a real path.
+        let gone = std::env::temp_dir()
+            .join(format!("wtcc-cwd-missing-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        assert!(cwd_is_missing(&gone));
+        assert!(cwd_is_missing(&format!("{gone} (deleted)")));
+    }
+
+    // --- BLOCKER fix: bounded post-reap spawn retry against a dying tmux server.
+    //
+    // Reaping the tmux server's LAST session tears the server down asynchronously
+    // (`exit-empty on`), so the immediate `new-session` can race it and fail. The
+    // retry is gated on `reaped`: only a reap justifies a retry+backoff; a plain
+    // spawn failure must surface at once. These pin that contract without tmux by
+    // driving `spawn_after_reap` with plain closures.
+
+    #[test]
+    fn spawn_after_reap_surfaces_first_error_without_a_reap() {
+        let mut calls = 0;
+        let r: anyhow::Result<()> = spawn_after_reap(false, || {
+            calls += 1;
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            calls, 1,
+            "no reap => exactly one attempt, no retry, no sleep"
+        );
+    }
+
+    #[test]
+    fn spawn_after_reap_does_not_retry_when_the_first_attempt_succeeds() {
+        let mut calls = 0;
+        let r: anyhow::Result<u32> = spawn_after_reap(true, || {
+            calls += 1;
+            Ok(calls)
+        });
+        assert_eq!(r.unwrap(), 1);
+        assert_eq!(
+            calls, 1,
+            "happy path never sleeps or retries, even after a reap"
+        );
+    }
+
+    #[test]
+    fn spawn_after_reap_retries_after_a_reap_then_succeeds() {
+        let mut calls = 0;
+        let r: anyhow::Result<u32> = spawn_after_reap(true, || {
+            calls += 1;
+            if calls < 3 {
+                Err(anyhow::anyhow!("server exited unexpectedly"))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r.unwrap(), 3);
+        assert_eq!(calls, 3, "retries the racing spawn until it wins");
+    }
+
+    #[test]
+    fn spawn_after_reap_gives_up_after_the_bounded_retry_budget() {
+        let mut calls = 0;
+        let r: anyhow::Result<()> = spawn_after_reap(true, || {
+            calls += 1;
+            Err(anyhow::anyhow!("still dying"))
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            calls, 6,
+            "one initial attempt + five bounded retries, then surfaces"
+        );
+    }
+
+    // Real-tmux behavior test on a PRIVATE server (`-L <socket>`) so it can never
+    // touch — or be perturbed by — the user's live default-server sessions. It
+    // pins the two-part #116 premise the production code relies on:
+    //   (1) `new-session -A` that REATTACHES ignores `-c <cwd>`, so pinning the
+    //       start dir alone cannot rescue a pre-existing session with a dead cwd;
+    //   (2) killing (reaping) that session first makes the recreate honor `-c`
+    //       and land in a live cwd.
+    // Best-effort: skips cleanly if tmux is unavailable.
+    #[test]
+    fn tmux_reattach_ignores_start_dir_until_the_dead_session_is_reaped() {
+        let pid = std::process::id();
+        let sock = format!("wtcc-it-{pid}");
+        let dead = std::env::temp_dir().join(format!("wtcc-it-dead-{pid}"));
+        let live = std::env::temp_dir().join(format!("wtcc-it-live-{pid}"));
+        if std::fs::create_dir_all(&dead).is_err() || std::fs::create_dir_all(&live).is_err() {
+            return;
+        }
+        let (dead_s, live_s) = (
+            dead.to_string_lossy().into_owned(),
+            live.to_string_lossy().into_owned(),
+        );
+        let name = "s";
+        let tmux = |args: &[&str]| -> Option<std::process::Output> {
+            std::process::Command::new("tmux")
+                .arg("-L")
+                .arg(&sock)
+                .args(args)
+                .output()
+                .ok()
+        };
+        let pane = || -> String {
+            tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                name,
+                "-F",
+                "#{pane_current_path}",
+            ])
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+        };
+        let cleanup = || {
+            let _ = tmux(&["kill-server"]);
+            let _ = std::fs::remove_dir_all(&dead);
+            let _ = std::fs::remove_dir_all(&live);
+        };
+
+        // A detached session whose cwd is `dead`, running `cat` so the pane stays
+        // alive. If tmux is unavailable/failed, skip.
+        match tmux(&["new-session", "-d", "-s", name, "-c", &dead_s, "cat"]) {
+            Some(o) if o.status.success() => {}
+            _ => {
+                cleanup();
+                return;
+            }
+        }
+        // A second, keep-alive session in a live dir so reaping the poisoned
+        // session below never empties the server. With `exit-empty on`, killing
+        // the server's LAST session tears the server down asynchronously and the
+        // immediate recreate races the dying server (`server exited unexpectedly`);
+        // production guards that with `spawn_after_reap`'s bounded retry, and the
+        // real app always has other worktree sessions alive. Keeping one here makes
+        // this reap→recreate assertion deterministic without a race.
+        let keep_s = std::env::temp_dir().to_string_lossy().into_owned();
+        let _ = tmux(&["new-session", "-d", "-s", "keepalive", "-c", &keep_s, "cat"]);
+        assert!(
+            pane().starts_with(&dead_s),
+            "the session starts in the dead dir"
+        );
+
+        // Remove the cwd out-of-band, then reattach with a fresh `-c <live>`.
+        let _ = std::fs::remove_dir_all(&dead);
+        let _ = tmux(&["new-session", "-A", "-d", "-s", name, "-c", &live_s, "cat"]);
+        let after_reattach = pane();
+        assert!(
+            cwd_is_missing(&after_reattach),
+            "reattach keeps the dead cwd — pinning `-c` alone cannot fix it, got {after_reattach:?}"
+        );
+
+        // Reap the poisoned session, then recreate: now `-c <live>` takes effect.
+        let _ = tmux(&["kill-session", "-t", name]);
+        let _ = tmux(&["new-session", "-d", "-s", name, "-c", &live_s, "cat"]);
+        let after_reap = pane();
+        let landed = std::path::Path::new(&after_reap).exists() && after_reap.starts_with(&live_s);
+
+        cleanup();
+        assert!(
+            landed,
+            "after reaping, the recreated session lands in the live cwd, got {after_reap:?}"
         );
     }
 
