@@ -742,6 +742,17 @@ impl App {
     /// Polls the attention tracker with a fresh idle snapshot, suppressing the
     /// active session. Returns the branch labels that newly need attention this
     /// frame, for the run loop to surface as desktop notifications.
+    /// Human-readable label for an attention notification: `"<repo> / <branch>"`,
+    /// falling back to just the branch when the repo index is unknown. Display-only
+    /// — never the internal composite/hash session key, and repo-qualified so two
+    /// expanded repos with a same-named branch are distinguishable (#99).
+    pub fn attention_label(&self, repo_index: usize, branch: &str) -> String {
+        match self.config.repos.get(repo_index) {
+            Some(repo) => format!("{} / {}", repo.name, branch),
+            None => branch.to_string(),
+        }
+    }
+
     pub fn poll_attention(&mut self) -> Vec<String> {
         let snapshot = self.session_manager.idle_durations();
         let active = self.active_session.clone();
@@ -757,7 +768,10 @@ impl App {
                             &SessionManager::session_name(&self.worktree_key(ri, &w.branch)) == name
                         })
                     })
-                    .map(|(_, w)| w.branch.clone())
+                    .map(|(i, w)| {
+                        let ri = self.worktree_repo.get(i).copied().unwrap_or(usize::MAX);
+                        self.attention_label(ri, &w.branch)
+                    })
             })
             .collect()
     }
@@ -1887,6 +1901,42 @@ mod tests {
     fn poll_attention_is_empty_without_sessions() {
         let mut app = app_with_fake_worktrees();
         assert!(app.poll_attention().is_empty());
+    }
+
+    // --- issue #99: attention notification labels are repo-qualified ----------
+    #[test]
+    fn attention_label_distinguishes_repos_and_omits_the_internal_key() {
+        let mut app = app_with_fake_worktrees(); // repos[0].name == "demo"
+        app.config.repos.push(Repository {
+            name: "other".to_string(),
+            path: PathBuf::from("/tmp/wtcc-attn-other"),
+            setup: None,
+            archive: None,
+            archived: Vec::new(),
+            base_ref: None,
+            copy_on_create: Vec::new(),
+            run: None,
+        });
+
+        let a = app.attention_label(0, "main");
+        let b = app.attention_label(1, "main");
+        assert_ne!(
+            a, b,
+            "the same branch in different repos must yield distinct labels"
+        );
+        assert!(
+            a.contains('/') && a.contains("main"),
+            "label should read '<repo> / <branch>', got {a:?}"
+        );
+        assert!(
+            !a.contains(&app.worktree_key(0, "main")),
+            "label must never leak the internal composite/hash key"
+        );
+        assert_eq!(
+            app.attention_label(99, "main"),
+            "main",
+            "an unknown repo index falls back to the bare branch"
+        );
     }
 
     // --- issue #51: rename branch + re-key the live agent session -----------
