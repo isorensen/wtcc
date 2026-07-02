@@ -1,12 +1,12 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::{App, Confirm, Focus, Overlay, Prompt};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection};
 use crate::keymap::{self, AGENT, Action, PRIMARY};
 use crate::repository::Repository;
 use crate::ui::palette;
 use crate::ui::sidebar::{self, SidebarRow};
-use crate::ui::{SIDEBAR_WIDTH, STATUS_HEIGHT};
+use crate::ui::{SIDEBAR_WIDTH, STATUS_HEIGHT, TAB_BAR_HEIGHT};
 use crate::worktree::Worktree;
 
 /// Applies a key event to the app, dispatching to the active overlay first and
@@ -33,6 +33,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         app.should_quit = true;
         return;
     }
+
+    // Any keystroke clears an active drag-selection highlight (issue #103). This
+    // also covers focus changes made via keys (e.g. Ctrl-O).
+    app.selection = None;
 
     match &app.overlay {
         Overlay::None => {
@@ -116,6 +120,17 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
     if !matches!(app.overlay, Overlay::None) {
         return;
     }
+    // A click on the agent surface focuses it and begins a text drag-selection
+    // (issue #103); the anchor and cursor start on the same cell (a bare click
+    // until a drag extends it).
+    if let Some(cell) = agent_grid_cell(col, row, area) {
+        app.focus = Focus::Agent;
+        app.selection = Some(Selection {
+            anchor: cell,
+            cursor: cell,
+        });
+        return;
+    }
     match hit_test(
         col,
         row,
@@ -127,10 +142,16 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
         app.show_archived,
     ) {
         Hit::None => {}
-        Hit::Agent => app.focus = Focus::Agent,
+        // The agent pane's border/tab strip (outside the selectable surface):
+        // focus it, leaving no selection behind.
+        Hit::Agent => {
+            app.focus = Focus::Agent;
+            app.selection = None;
+        }
         // Clicking a repo header expands/collapses it (issue #82).
         Hit::Repo(i) => {
             app.focus = Focus::Sidebar;
+            app.selection = None;
             app.toggle_repo(i);
         }
         // Clicking a worktree selects it AND activates its repo, so the
@@ -138,6 +159,7 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
         // the click lands in a different expanded repo.
         Hit::Worktree(i) => {
             app.focus = Focus::Sidebar;
+            app.selection = None;
             if i < app.worktrees.len() {
                 app.selected_worktree = Some(i);
                 if let Some(&ri) = app.worktree_repo.get(i) {
@@ -146,6 +168,112 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
             }
         }
     }
+}
+
+/// Maps a screen `(col, row)` to a `(grid_row, grid_col)` cell in the agent
+/// surface, or `None` when the point falls on the sidebar, any border, the tab
+/// strip, the status bar, or outside the surface. Mirrors `render_agent`'s
+/// geometry exactly. Pure and total: never panics on out-of-range coordinates.
+pub fn agent_grid_cell(col: u16, row: u16, area: Rect) -> Option<(u16, u16)> {
+    let (rows, cols) = crate::ui::agent_pane_size(area);
+    let x0 = SIDEBAR_WIDTH + 1;
+    let y0 = 1 + TAB_BAR_HEIGHT;
+    if col < x0 || row < y0 {
+        return None;
+    }
+    let (gc, gr) = (col - x0, row - y0);
+    if gc >= cols || gr >= rows {
+        return None;
+    }
+    Some((gr, gc))
+}
+
+/// Extends the active drag-selection to the surface cell under `(col, row)`.
+/// A no-op when no selection is active; a drag that leaves the surface (maps to
+/// `None`) is ignored, clamping the cursor at its last in-bounds cell.
+pub fn handle_mouse_drag(app: &mut App, col: u16, row: u16, area: Rect) {
+    if let Some(sel) = app.selection.as_mut()
+        && let Some(cell) = agent_grid_cell(col, row, area)
+    {
+        sel.cursor = cell;
+    }
+}
+
+/// Completes a drag-selection on mouse-up. A real drag (`anchor != cursor`)
+/// extracts the selected text from the active session's screen and stages an
+/// OSC 52 copy in `app.pending_clipboard`, keeping the highlight until the next
+/// keypress. A bare click (`anchor == cursor`) was only a focus click and clears
+/// the selection without copying. Pure: no terminal I/O (the run loop writes).
+pub fn handle_mouse_up(app: &mut App, _col: u16, _row: u16, _area: Rect) {
+    let Some(sel) = app.selection else {
+        return;
+    };
+    if sel.anchor == sel.cursor {
+        app.selection = None;
+        return;
+    }
+    let (start, end) = sel.normalized();
+    let Some(name) = app.active_session.clone() else {
+        app.selection = None;
+        return;
+    };
+    let Some(session) = app.session_manager.get(&name) else {
+        app.selection = None;
+        return;
+    };
+    // Clamp both endpoints to the CURRENT screen size before extracting: the
+    // anchor was captured at mouse-down and may be stale if the terminal (and its
+    // vt100 screen) shrank mid-drag. `contents_between` does an unchecked
+    // `cols - start_col`, so a start column past the width would panic (debug) or
+    // yield garbage (release).
+    let text = {
+        let parser = session.parser().lock().unwrap();
+        let screen = parser.screen();
+        let (srows, scols) = screen.size();
+        if srows == 0 || scols == 0 {
+            String::new()
+        } else {
+            let cr = |(r, c): (u16, u16)| (r.min(srows - 1), c.min(scols - 1));
+            let (s, e) = (cr(start), cr(end));
+            let end_col = (e.1 + 1).min(scols); // end col exclusive; never exceeds width
+            screen.contents_between(s.0, s.1, e.0, end_col)
+        }
+    };
+    app.pending_clipboard = Some(osc52_copy(&text));
+    // `app.selection` stays set: the reversed highlight persists until a keypress.
+}
+
+/// Wraps `text` in an OSC 52 "set clipboard" sequence (`ESC ] 52 ; c ; <b64> BEL`),
+/// which sets the host terminal's clipboard even over SSH and in the alternate
+/// screen. The payload is standard base64 of the raw UTF-8 bytes.
+pub fn osc52_copy(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()))
+}
+
+/// Standard RFC 4648 base64 (`+/` alphabet, `=` padding). Hand-rolled to keep the
+/// dependency surface minimal for this single call site.
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Applies a wheel-scroll at column `col` to the app. Scrolling within the
@@ -158,7 +286,26 @@ pub fn handle_mouse(app: &mut App, col: u16, row: u16, area: Rect) {
 /// focus, mirroring how clicking a sidebar row focuses it: focus moves to the
 /// sidebar first so navigation runs even when the agent pane holds focus.
 pub fn handle_scroll(app: &mut App, up: bool, col: u16) {
-    if !matches!(app.overlay, Overlay::None) || col >= SIDEBAR_WIDTH {
+    if !matches!(app.overlay, Overlay::None) {
+        return;
+    }
+    if col >= SIDEBAR_WIDTH {
+        // The scrollback view moves independently of the captured grid cells, so a
+        // persisted highlight would point at the wrong content; clear it whether or
+        // not a session is active.
+        app.selection = None;
+        // Wheel over the agent pane scrolls its terminal scrollback (#106);
+        // focus is unchanged.
+        if let Some(name) = app.active_session.clone()
+            && let Some(session) = app.session_manager.get(&name)
+        {
+            const STEP: usize = 3;
+            if up {
+                session.scroll_up(STEP)
+            } else {
+                session.scroll_down(STEP)
+            }
+        }
         return;
     }
     app.focus = Focus::Sidebar;
@@ -178,6 +325,10 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
     let Some(session) = app.session_manager.get(&name) else {
         return;
     };
+
+    // Typing follows the live agent: snap the scrollback view back to the
+    // bottom on any forwarded keypress (#106).
+    session.scroll_to_bottom();
 
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let Some(bytes) = agent_key_bytes(key.code, ctrl, shift) else {
@@ -1014,8 +1165,11 @@ mod tests {
         assert_eq!(a.selected_worktree, Some(0));
     }
 
+    // Covers only the NO-active-session case: scrolling over the agent pane must
+    // not disturb the sidebar (selection/focus). The active-session wiring (the
+    // scrollback move) is pinned by `scroll_over_agent_with_active_session_moves_scrollback`.
     #[test]
-    fn scroll_in_agent_region_is_noop() {
+    fn scroll_in_agent_region_without_session_leaves_sidebar_untouched() {
         let mut a = app();
         a.worktrees = worktrees(2);
         a.worktree_repo = vec![0, 0];
@@ -1092,5 +1246,228 @@ mod tests {
             agent_key_bytes(KeyCode::Enter, false, false),
             Some(vec![b'\r'])
         );
+    }
+
+    // --- issue #103: drag-select + OSC 52 copy ------------------------------
+
+    #[test]
+    fn base64_encode_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn osc52_copy_wraps_base64_in_the_clipboard_sequence() {
+        assert_eq!(osc52_copy("foobar"), "\x1b]52;c;Zm9vYmFy\x07");
+    }
+
+    #[test]
+    fn agent_grid_cell_maps_surface_points() {
+        // area() is 80x24: x0 = 35, y0 = 2, surface = 20 rows x 44 cols.
+        assert_eq!(agent_grid_cell(35, 2, area()), Some((0, 0)));
+        assert_eq!(agent_grid_cell(40, 5, area()), Some((3, 5)));
+    }
+
+    #[test]
+    fn agent_grid_cell_rejects_non_surface_points() {
+        assert_eq!(agent_grid_cell(2, 5, area()), None); // sidebar
+        assert_eq!(agent_grid_cell(34, 5, area()), None); // agent left border
+        assert_eq!(agent_grid_cell(40, 1, area()), None); // tab strip row
+        assert_eq!(agent_grid_cell(40, 23, area()), None); // status bar row
+        assert_eq!(agent_grid_cell(1000, 1000, area()), None); // out of range
+    }
+
+    #[test]
+    fn contents_between_end_col_is_exclusive_so_plus_one_includes_cursor_cell() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"hello\r\nworld");
+        let screen = parser.screen();
+        // Selecting grid (0,0)..=(0,4) is "hello": end_col 4 inclusive -> +1 = 5.
+        assert_eq!(screen.contents_between(0, 0, 0, 5), "hello");
+        // A multi-row selection ending at (1,4) inclusive -> +1 = 5 = "world".
+        assert_eq!(screen.contents_between(0, 0, 1, 5), "hello\nworld");
+    }
+
+    #[test]
+    fn click_without_drag_copies_nothing_and_clears_selection() {
+        let mut a = app();
+        handle_mouse(&mut a, 35, 2, area()); // Down on surface cell (0,0)
+        assert!(a.selection.is_some());
+        handle_mouse_up(&mut a, 35, 2, area());
+        assert_eq!(a.pending_clipboard, None);
+        assert_eq!(a.selection, None);
+    }
+
+    #[test]
+    fn drag_then_up_stages_osc52_copy_and_keeps_selection() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-copy-test";
+        // `true` produces no PTY output, so the parser holds exactly the content
+        // we feed it below (no race with the reader thread).
+        let cmd = CommandBuilder::new("true");
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+        a.session_manager
+            .get(name)
+            .unwrap()
+            .parser()
+            .lock()
+            .unwrap()
+            .process(b"hello\r\nworld");
+
+        // Down (0,0)=screen(35,2), drag to (0,4)=screen(39,2), release.
+        handle_mouse(&mut a, 35, 2, area());
+        handle_mouse_drag(&mut a, 39, 2, area());
+        handle_mouse_up(&mut a, 39, 2, area());
+
+        assert_eq!(a.pending_clipboard, Some(osc52_copy("hello")));
+        assert!(
+            a.selection.is_some(),
+            "highlight persists until next keypress"
+        );
+    }
+
+    #[test]
+    fn drag_outside_surface_clamps_cursor_to_last_in_bounds_cell() {
+        let mut a = app();
+        handle_mouse(&mut a, 35, 2, area()); // anchor (0,0)
+        handle_mouse_drag(&mut a, 39, 2, area()); // cursor (0,4)
+        handle_mouse_drag(&mut a, 2, 2, area()); // into the sidebar -> ignored
+        let sel = a.selection.unwrap();
+        assert_eq!(sel.cursor, (0, 4));
+    }
+
+    /// BLOCKER regression: the anchor is captured at mouse-down and goes stale if
+    /// the vt100 screen shrinks mid-drag (terminal resize). `handle_mouse_up` must
+    /// clamp both endpoints to the current screen before `contents_between`, which
+    /// otherwise does an unchecked `cols - start_col` (panic in debug).
+    #[test]
+    fn mouse_up_clamps_stale_selection_after_screen_shrinks() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-clamp-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 24, 80)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+
+        // Anchor near the wide right edge, cursor a row below: both fall outside a
+        // 10-column screen once it shrinks.
+        a.selection = Some(Selection {
+            anchor: (0, 70),
+            cursor: (1, 5),
+        });
+        a.session_manager.get(name).unwrap().resize(5, 10).unwrap();
+
+        handle_mouse_up(&mut a, 0, 0, area());
+        assert!(
+            a.pending_clipboard.is_some(),
+            "a clamped selection still stages a copy instead of panicking"
+        );
+    }
+
+    /// ISSUE #103 fix: a real drag that ends with no active session must clear the
+    /// lingering highlight (and copy nothing), not leave it over the placeholder.
+    #[test]
+    fn mouse_up_with_no_active_session_clears_selection_without_copy() {
+        let mut a = app();
+        a.active_session = None;
+        a.selection = Some(Selection {
+            anchor: (0, 0),
+            cursor: (1, 3),
+        });
+        handle_mouse_up(&mut a, 0, 0, area());
+        assert_eq!(a.selection, None);
+        assert_eq!(a.pending_clipboard, None);
+    }
+
+    /// Wheel-scroll over the agent pane clears any highlight (the scrollback view
+    /// moves independently), even with no active session.
+    #[test]
+    fn scroll_over_agent_clears_selection() {
+        let mut a = app();
+        a.selection = Some(Selection {
+            anchor: (0, 0),
+            cursor: (1, 2),
+        });
+        handle_scroll(&mut a, true, SIDEBAR_WIDTH + 2);
+        assert_eq!(a.selection, None);
+    }
+
+    /// Pins the agent-pane scroll wiring with a live session: wheel up scrolls into
+    /// history (scrollback grows), wheel down moves back toward the live bottom.
+    #[test]
+    fn scroll_over_agent_with_active_session_moves_scrollback() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-scroll-wire-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 5, 20)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+
+        let scrollback = |a: &App| {
+            a.session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback()
+        };
+        // Wait until output exceeds the 5-row screen so history exists to scroll into.
+        for _ in 0..40 {
+            let has_history = a
+                .session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("60");
+            if has_history {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_eq!(scrollback(&a), 0, "starts at the live bottom");
+        handle_scroll(&mut a, true, SIDEBAR_WIDTH + 2); // wheel up
+        let up = scrollback(&a);
+        assert!(up > 0, "wheel up scrolls into history");
+        handle_scroll(&mut a, false, SIDEBAR_WIDTH + 2); // wheel down
+        assert!(
+            scrollback(&a) < up,
+            "wheel down scrolls back toward the live bottom"
+        );
+    }
+
+    #[test]
+    fn keypress_clears_active_selection() {
+        let mut a = app();
+        a.selection = Some(Selection {
+            anchor: (0, 0),
+            cursor: (1, 2),
+        });
+        handle_key(&mut a, key(KeyCode::Char('j')));
+        assert_eq!(a.selection, None);
     }
 }

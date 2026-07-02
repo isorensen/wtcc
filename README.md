@@ -130,6 +130,12 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `Ctrl-Q` | Quit |
 | `Ctrl-C` | Forwarded to the agent (does **not** quit) |
 
+**Text selection** — drag with the mouse in the agent pane to select text; on
+release the selection is copied to your system clipboard via OSC 52 (works over
+SSH and in the alternate screen). The highlight clears on the next keypress.
+Since wtcc captures the mouse, hold `Shift` while dragging to fall back to your
+terminal's own native selection.
+
 ## Requirements
 
 - Rust (2024 edition)

@@ -10,6 +10,13 @@ All notable changes to this project are documented here. The format is based on
 - **Switch repos from the keyboard**: `S` cycles to the next repo (expanding it if it
   was collapsed), so collapsed repos are reachable without the command palette or mouse.
   It complements free arrow navigation and mirrors `A` (switch agent). (#108)
+- **Scroll the agent pane's terminal history**: the agent PTY now keeps a bounded
+  scrollback buffer and the mouse wheel scrolls back through it over the agent pane;
+  typing snaps the view back to the live bottom. (#106)
+- **Select and copy text in the agent pane**: drag inside the agent pane to select text;
+  releasing copies it to the system clipboard via OSC 52 (works over SSH, no clipboard
+  daemon needed). The highlight clears on the next keypress. `Shift+drag` still falls back
+  to the terminal's native selection. (#103)
 
 ### Changed
 - **All repos start expanded on launch**: every registered repo now shows its

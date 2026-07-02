@@ -20,7 +20,7 @@ use ratatui::layout::Rect;
 
 use wtcc::app::App;
 use wtcc::config::Config;
-use wtcc::event::{handle_key, handle_mouse, handle_scroll};
+use wtcc::event::{handle_key, handle_mouse, handle_mouse_drag, handle_mouse_up, handle_scroll};
 use wtcc::ui;
 
 const POLL: Duration = Duration::from_millis(16);
@@ -120,6 +120,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
                 Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
                     handle_mouse(&mut app, m.column, m.row, area);
                 }
+                Event::Mouse(m) if m.kind == MouseEventKind::Drag(MouseButton::Left) => {
+                    handle_mouse_drag(&mut app, m.column, m.row, area);
+                }
+                Event::Mouse(m) if m.kind == MouseEventKind::Up(MouseButton::Left) => {
+                    handle_mouse_up(&mut app, m.column, m.row, area);
+                }
                 Event::Mouse(m)
                     if matches!(
                         m.kind,
@@ -130,6 +136,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> anyho
                 }
                 _ => {}
             }
+        }
+
+        // Drain a completed drag-copy to the host clipboard via OSC 52. Works in
+        // raw/alt-screen mode and over SSH; a write failure is non-fatal (#103).
+        if let Some(seq) = app.pending_clipboard.take() {
+            use std::io::Write;
+            let mut out = io::stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
         }
     }
     Ok(())
