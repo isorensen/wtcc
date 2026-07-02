@@ -273,7 +273,10 @@ fn render_confirm(app: &App, confirm: &Confirm, area: Rect, buf: &mut Buffer) {
 
     let text = match confirm {
         Confirm::RemoveWorktree(path) => {
-            format!("Remove worktree {}? (y/n)", path.display())
+            format!(
+                "Delete worktree directory from disk?\n{}\nThe branch and its commits are kept.\n(y/n)",
+                path.display()
+            )
         }
         Confirm::RemoveRepo(index) => {
             let name = app

@@ -105,8 +105,8 @@ command. *Someday-maybe:* split panes within a tab, and mouse-wheel scroll into 
 | `a` | Register a repository |
 | `D` | Unregister the selected repository (config only; nothing on disk is deleted) |
 | `n` | Add a worktree |
-| `d` | Remove the selected worktree |
-| `x` | Archive / unarchive the selected worktree (soft hide; nothing deleted) |
+| `d` | Remove the selected worktree — **deletes its working directory from disk** (git refuses if it has uncommitted/untracked changes; the branch & commits are kept) |
+| `x` | Archive / unarchive the selected worktree — **hides** it from the sidebar; nothing is deleted |
 | `X` | Show / hide archived worktrees |
 | `b` | Rename the selected worktree's branch |
 | `A` | Switch the worktree's agent (from configured presets) |

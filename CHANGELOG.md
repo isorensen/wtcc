@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Removing a worktree (`d`) now states plainly that it deletes the directory from disk**:
+  the confirm prompt reads "Delete worktree directory from disk? … The branch and its
+  commits are kept," distinct from `Shift+D` (unregister repo, config only) and `x`
+  (archive/hide, nothing deleted); the README keybinding table is clarified to match.
+  `d` is also now guarded to **never** delete a non-worktree directory: it is a no-op on a
+  plain (non-git) target (#102) and on a repo's main working tree, and it still never runs
+  with `--force` (git refuses on uncommitted/untracked changes). (#117)
+
 ### Fixed
 - **Agent pane no longer hangs on a session whose directory was removed out-of-band**: if a
   worktree's directory was deleted while wtcc had a tmux session there, `tmux new-session -A`

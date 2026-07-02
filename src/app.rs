@@ -1094,6 +1094,20 @@ impl App {
             self.status = Some("no repo selected".to_string());
             return;
         };
+        // Main-working-tree guard: never remove the repo root itself (a git repo
+        // whose only "worktree" is its main checkout). git refuses this, but guard
+        // so wtcc never even shells out on a non-linked path and shows a clean
+        // message. Compare canonically to be robust to symlink/trailing-slash
+        // differences (`git worktree list` returns canonical paths, the configured
+        // repo path may not), falling back to a raw compare when canonicalize fails.
+        let is_main_tree = match (std::fs::canonicalize(path), std::fs::canonicalize(&repo)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => path == repo.as_path(),
+        };
+        if is_main_tree {
+            self.status = Some("cannot remove the main working tree".into());
+            return;
+        }
         // Spec ordering: kill agent session -> archive -> git remove. The agent
         // is reaped first so it is quiescent before the archive runs (it can't be
         // writing files mid-archive).
@@ -3351,5 +3365,103 @@ mod tests {
             !app.worktrees[0].head.is_empty(),
             "a real git worktree carries a HEAD"
         );
+    }
+
+    // --- issue #117: `d` must never delete a non-worktree / the main tree ----
+
+    /// On a selected plain (non-git) dir (#102), remove is a no-op gated by the
+    /// `is_git` predicate: it only sets the status line and never touches disk.
+    #[test]
+    fn remove_worktree_on_plain_repo_is_gated_and_keeps_dir() {
+        let dir = tempfile::tempdir().unwrap(); // NON-git directory
+        let repo = crate::repository::register(dir.path()).unwrap();
+        assert_eq!(repo.kind, RepoKind::Plain);
+
+        let config = Config {
+            repos: vec![repo],
+            ..Default::default()
+        };
+        let mut app = App::with_provider(
+            config,
+            Arc::new(FakeProvider {
+                status: VcsStatus::default(),
+            }),
+        );
+
+        let path = dir.path().to_path_buf();
+        app.remove_worktree(&path);
+
+        assert_eq!(app.status.as_deref(), Some("not a git repository"));
+        assert!(path.exists(), "a plain dir must never be deleted from disk");
+    }
+
+    /// Targeting the repo root itself (a git repo whose only worktree is its main
+    /// checkout) is refused before any git call — clean message, dir untouched.
+    #[test]
+    fn remove_worktree_on_main_working_tree_is_refused_and_keeps_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let mut app = app_for_repo(repo.clone());
+        assert_eq!(app.worktrees.len(), 1, "only the main checkout exists");
+
+        app.remove_worktree(&repo);
+
+        assert_eq!(
+            app.status.as_deref(),
+            Some("cannot remove the main working tree")
+        );
+        assert!(repo.exists(), "the main working tree must never be deleted");
+    }
+
+    /// A clean linked worktree IS removed (the intended destructive action), but
+    /// its branch and commits survive — `git worktree remove` only deletes the dir.
+    #[test]
+    fn remove_worktree_on_clean_linked_worktree_deletes_dir_keeps_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let wt = dir.path().join("wt-feat");
+        crate::worktree::add_new_branch(&repo, &wt, "feat", None).unwrap();
+        assert!(wt.exists());
+
+        let mut app = app_for_repo(repo.clone());
+        app.remove_worktree(&wt);
+
+        assert!(!wt.exists(), "a clean linked worktree dir must be removed");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["branch", "--list", "feat"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("feat"),
+            "the branch must survive worktree removal"
+        );
+    }
+
+    /// A dirty linked worktree (an untracked file) is refused by git — wtcc adds
+    /// no `--force`, so removal fails and the directory is left on disk.
+    #[test]
+    fn remove_worktree_on_dirty_linked_worktree_is_refused_and_keeps_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        let wt = dir.path().join("wt-dirty");
+        crate::worktree::add_new_branch(&repo, &wt, "dirty", None).unwrap();
+        std::fs::write(wt.join("untracked.txt"), b"scratch").unwrap();
+
+        let mut app = app_for_repo(repo.clone());
+        app.remove_worktree(&wt);
+
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.starts_with("remove failed")),
+            "git must refuse a dirty worktree (no --force); got {:?}",
+            app.status
+        );
+        assert!(wt.exists(), "a dirty worktree must not be deleted");
     }
 }
