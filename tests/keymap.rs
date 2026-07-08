@@ -253,7 +253,10 @@ fn palette_and_help_share_one_label_per_action() {
         .map(|(_, label)| label)
         .collect();
     for a in palette::filter("") {
-        if matches!(a, Action::SwitchRepo | Action::MarkReady | Action::ClosePr) {
+        if matches!(
+            a,
+            Action::SwitchRepo | Action::MarkReady | Action::ClosePr | Action::DumpScrollbackEditor
+        ) {
             // These have no PRIMARY chord (palette-only), so they are absent from
             // the PRIMARY help rows by design — skip the help cross-check.
             continue;

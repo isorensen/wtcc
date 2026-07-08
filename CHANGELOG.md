@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Dump the agent scrollback to `$PAGER` / `$EDITOR`**: press `P` (or the command palette)
+  to write the active tab's full scrollback to a temporary file and open it in `$PAGER`
+  (fallback `less -R`) in a new tab — the TUI is never suspended. A palette variant opens it
+  in `$EDITOR` (fallback `vi`). The viewer runs as an explicit argv vector (the file is a
+  discrete argument, never a shell string); the temp file is written `0600` in a `0700`
+  directory (it may contain sensitive terminal output) and is removed when the tab closes or
+  wtcc exits. (#124)
 - **Incremental search in the agent scrollback**: while in scroll mode, press `/` to search.
   Type a query (smart-case: lowercase matches any case, mixed-case is case-sensitive), press
   `Enter` to jump to the nearest match, and use `n`/`N` to step to the next/previous match

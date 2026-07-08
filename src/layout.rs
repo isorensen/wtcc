@@ -21,6 +21,10 @@ pub enum TabKind {
     Shell,
     /// Runs the repo's `run` command (`wtcc-run-<slug>`) via tmux `$SHELL -c` (issue #56).
     Run,
+    /// A transient tab hosting a pager/editor over a dumped scrollback file
+    /// (`wtcc-pager-<slug>-p<n>`), spawned directly (no tmux) so the host TUI is
+    /// never suspended (issue #124).
+    Pager,
 }
 
 /// A single terminal surface within a worktree: its kind, the named tmux/PTY
@@ -88,6 +92,25 @@ impl WorktreeLayout {
         self.active = self.tabs.len() - 1;
     }
 
+    /// Appends a transient Pager surface (`wtcc-pager-<slug>-p<n>`) hosting a
+    /// pager/editor over a dumped scrollback file (issue #124), focuses it, bumps
+    /// the monotonic id, and returns the unique session name. A DISTINCT name per
+    /// dump (via `next_id`) so repeated dumps never collide. `slug` is slugified
+    /// for the same safety reason as `new`/`add_shell_tab`.
+    pub fn add_pager_tab(&mut self, slug: &str) -> String {
+        let slug = slugify(slug);
+        let n = self.next_id;
+        let session = format!("wtcc-pager-{slug}-p{n}");
+        self.tabs.push(Tab {
+            kind: TabKind::Pager,
+            session: session.clone(),
+            title: "pager".to_string(),
+        });
+        self.active = self.tabs.len() - 1;
+        self.next_id += 1;
+        session
+    }
+
     /// The currently focused tab. The model always keeps at least the agent tab,
     /// so this never panics.
     pub fn active_tab(&self) -> &Tab {
@@ -120,5 +143,44 @@ impl WorktreeLayout {
             self.active = self.tabs.len() - 1;
         }
         Some(removed.session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- issue #124: transient Pager tab ------------------------------------
+
+    #[test]
+    fn add_pager_tab_appends_a_uniquely_named_focused_tab() {
+        let mut layout = WorktreeLayout::new("feat/foo");
+        let first = layout.add_pager_tab("feat/foo");
+        assert_eq!(layout.tabs.len(), 2);
+        let tab = layout.active_tab();
+        assert_eq!(tab.kind, TabKind::Pager);
+        assert_eq!(tab.title, "pager");
+        assert_eq!(tab.session, first);
+        assert_eq!(layout.active, 1, "the new pager tab is focused");
+        assert_eq!(
+            first, "wtcc-pager-feat-foo-p1",
+            "the session name is slugified and id-suffixed"
+        );
+
+        // A second dump gets a DISTINCT name so repeated dumps never collide.
+        let second = layout.add_pager_tab("feat/foo");
+        assert_ne!(first, second);
+        assert_eq!(second, "wtcc-pager-feat-foo-p2");
+    }
+
+    #[test]
+    fn pager_tabs_are_closable() {
+        let mut layout = WorktreeLayout::new("main");
+        let session = layout.add_pager_tab("main");
+        // The focused pager tab (not index 0, not the last-remaining) closes,
+        // returning its session for the caller to kill.
+        assert_eq!(layout.close_active(), Some(session));
+        assert_eq!(layout.tabs.len(), 1, "only the agent tab remains");
+        assert_eq!(layout.active, 0);
     }
 }

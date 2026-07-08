@@ -41,6 +41,9 @@ pub enum Action {
     CloseTab,
     NextTab,
     PrevTab,
+    // Dump the active tab's scrollback to `$PAGER`/`$EDITOR` in a new tab (#124).
+    DumpScrollback,
+    DumpScrollbackEditor,
     // Scrollback navigation (#122). All pure modal/navigation actions —
     // `in_palette` is false for every one, so they are reachable only by key.
     ScrollMode,
@@ -57,7 +60,7 @@ pub enum Action {
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 39] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -86,6 +89,8 @@ impl Action {
         Action::CloseTab,
         Action::NextTab,
         Action::PrevTab,
+        Action::DumpScrollback,
+        Action::DumpScrollbackEditor,
         Action::ScrollMode,
         Action::ScrollUp,
         Action::ScrollDown,
@@ -130,6 +135,8 @@ impl Action {
             Action::CloseTab => "Close tab",
             Action::NextTab => "Next tab",
             Action::PrevTab => "Previous tab",
+            Action::DumpScrollback => "Dump scrollback to pager",
+            Action::DumpScrollbackEditor => "Dump scrollback to editor",
             Action::ScrollMode => "scroll mode",
             Action::ScrollUp => "scroll up",
             Action::ScrollDown => "scroll down",
@@ -169,6 +176,8 @@ impl Action {
                 | Action::CloseTab
                 | Action::NextTab
                 | Action::PrevTab
+                | Action::DumpScrollback
+                | Action::DumpScrollbackEditor
                 | Action::Quit
         )
     }
@@ -350,6 +359,13 @@ pub static PRIMARY: &[Binding] = &[
     Binding {
         chords: &[Chord::key(KeyCode::Char('['))],
         action: Action::PrevTab,
+    },
+    // Dump the active tab's scrollback to `$PAGER` in a new tab (#124). `P` is
+    // free; `Chord::matches` ignores SHIFT for Char, so uppercase `P` fires. The
+    // editor variant is palette-only.
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('P'))],
+        action: Action::DumpScrollback,
     },
 ];
 
