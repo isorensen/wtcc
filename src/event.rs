@@ -819,6 +819,16 @@ fn run_action(app: &mut App, action: Action) {
         Action::CloseTab => app.close_tab(),
         Action::NextTab => app.next_tab(),
         Action::PrevTab => app.prev_tab(),
+        // The pager PTY must spawn immediately with its specific argv, so reuse the
+        // live pane size the run loop last handed `ensure_active_session` (#124).
+        Action::DumpScrollback => {
+            let (rows, cols) = app.pane_size();
+            app.dump_scrollback(false, rows, cols);
+        }
+        Action::DumpScrollbackEditor => {
+            let (rows, cols) = app.pane_size();
+            app.dump_scrollback(true, rows, cols);
+        }
         // Scroll-mode actions are dispatched by `handle_scroll_mode`/`handle_agent`,
         // never through the PRIMARY keymap or the palette that feed `run_action`.
         Action::ScrollMode

@@ -99,6 +99,24 @@ pub fn agent_argv(session_name: &str, command: &str, cwd: &Path) -> Vec<String> 
     argv
 }
 
+/// Splits a `$PAGER`/`$EDITOR` value into (program, leading-args), whitespace-
+/// separated, so the viewer runs as a discrete argv vector (never a shell
+/// string). The dumped file is appended as a separate argv element by the caller.
+/// Empty/blank input falls back to `fallback` (already split the same way).
+///
+/// SECURITY (#124): deliberately NOT shell quoting. `$PAGER`/`$EDITOR` is
+/// user-trusted config, and the FILE is a separate argv element, so there is no
+/// injection surface — a plain `split_whitespace` is correct and sufficient.
+pub fn viewer_argv(value: &str, fallback: &str) -> Vec<String> {
+    debug_assert!(!fallback.trim().is_empty(), "fallback must be non-blank");
+    let source = if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    };
+    source.split_whitespace().map(str::to_string).collect()
+}
+
 /// Decides whether a tmux `#{pane_current_path}` value points at a directory that
 /// no longer exists. tmux reports a removed cwd as the original path with a
 /// literal `" (deleted)"` suffix (it readlinks `/proc/<pid>/cwd`), which never
@@ -706,10 +724,11 @@ impl SessionManager {
         }
     }
 
-    /// Spawns a session from an arbitrary command and registers it under `name`.
-    /// Test-only: lets UI tests build an active session without depending on
-    /// `tmux` being installed on the host.
-    #[cfg(test)]
+    /// Spawns a session from an arbitrary `CommandBuilder` and registers it under
+    /// `name`, bypassing tmux. Used by the scrollback-dump pager (#124), which must
+    /// run `$PAGER`/`$EDITOR` as a DIRECT PTY child (never via `$SHELL -c`, which
+    /// would shell-parse the file path), and by UI tests that build an active
+    /// session without depending on `tmux` being installed on the host.
     pub(crate) fn insert_spawned(
         &mut self,
         name: &str,
@@ -918,6 +937,21 @@ mod tests {
         // Uppercase in query => case-sensitive.
         assert_eq!(match_columns("aAaA", "A"), vec![1, 3]);
         assert!(match_columns("abc", "").is_empty());
+    }
+
+    // --- issue #124: viewer argv splitting ----------------------------------
+
+    #[test]
+    fn viewer_argv_splits_falls_back_and_handles_single_token() {
+        // A program + flag splits into a discrete argv vector.
+        assert_eq!(viewer_argv("less -R", "less -R"), vec!["less", "-R"]);
+        // A single token stays one element.
+        assert_eq!(viewer_argv("vi", "vi"), vec!["vi"]);
+        // Blank / whitespace-only input falls back (fallback is split the same way).
+        assert_eq!(viewer_argv("", "less -R"), vec!["less", "-R"]);
+        assert_eq!(viewer_argv("   ", "vi"), vec!["vi"]);
+        // Extra whitespace between tokens collapses.
+        assert_eq!(viewer_argv("  nvim  -R ", "vi"), vec!["nvim", "-R"]);
     }
 
     #[test]

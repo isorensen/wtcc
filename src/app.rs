@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -254,6 +256,16 @@ pub struct App {
     /// refresh; results from a superseded worker are simply never drained.
     /// Replacing this `Receiver` drops it, so the orphaned worker's `Sender::send` returns `Err` and the thread exits.
     vcs_rx: Option<Receiver<(PathBuf, VcsStatus)>>,
+    /// Monotonic counter for unique scrollback-dump temp file names (#124), so
+    /// repeated dumps in one worktree never overwrite each other.
+    pub dump_counter: usize,
+    /// Live scrollback-dump temp files keyed by their Pager tab's session name
+    /// (#124). Removed (and unlinked) when the tab closes or the app drops.
+    dump_files: HashMap<String, PathBuf>,
+    /// Last agent-pane size fed to `ensure_active_session` by the run loop, reused
+    /// when a palette/key action must spawn a PTY (e.g. the #124 pager) but has no
+    /// pane geometry of its own.
+    last_pane_size: (u16, u16),
 }
 
 /// Expands a leading `~` to the home directory and resolves relative paths
@@ -341,6 +353,9 @@ impl App {
             vcs_status: HashMap::new(),
             vcs_provider,
             vcs_rx: None,
+            dump_counter: 0,
+            dump_files: HashMap::new(),
+            last_pane_size: (24, 80),
         };
         if selected_repo.is_some() {
             app.refresh_worktrees();
@@ -771,6 +786,8 @@ impl App {
                 if self.active_session.as_deref() == Some(session.as_str()) {
                     self.active_session = None;
                 }
+                // A closed Pager tab's dumped scrollback file is unlinked (#124).
+                self.forget_dump_file(&session);
             }
             None => self.status = Some("cannot close the agent tab".to_string()),
         }
@@ -780,7 +797,17 @@ impl App {
     /// and records its name in `active_session`. Seeds the worktree's tab layout
     /// (agent-only) on first use. The agent tab runs the worktree's agent command;
     /// a shell tab runs the default shell (`None`). Spawn errors land in `status`.
+    /// The agent-pane geometry `(rows, cols)` the run loop last handed
+    /// `ensure_active_session`. Reused by key/palette actions that must spawn a PTY
+    /// (e.g. the #124 pager) but carry no size of their own.
+    pub fn pane_size(&self) -> (u16, u16) {
+        self.last_pane_size
+    }
+
     pub fn ensure_active_session(&mut self, rows: u16, cols: u16) {
+        // Remember the live pane geometry so key/palette actions that must spawn a
+        // PTY but carry no size of their own (e.g. the #124 pager) can reuse it.
+        self.last_pane_size = (rows, cols);
         let Some(wt) = self.current_worktree() else {
             self.active_session = None;
             return;
@@ -827,6 +854,16 @@ impl App {
                 Some(cmd) => self
                     .session_manager
                     .ensure_run(&tab.session, cmd, &path, rows, cols),
+                None => self
+                    .session_manager
+                    .ensure_named(&tab.session, &path, None, rows, cols),
+            },
+            // A Pager tab's PTY is spawned eagerly by `dump_scrollback` with the
+            // viewer's specific argv (which this frame-driven path cannot know), so
+            // a live session is a no-op here. If it died/was removed out of band,
+            // fall back to a plain shell so the tab stays usable, never blank.
+            TabKind::Pager => match self.session_manager.get(&tab.session) {
+                Some(session) => Ok(session),
                 None => self
                     .session_manager
                     .ensure_named(&tab.session, &path, None, rows, cols),
@@ -1207,6 +1244,10 @@ impl App {
             if let Some(layout) = self.layouts.remove(&slug) {
                 for tab in &layout.tabs {
                     self.session_manager.kill(&tab.session);
+                    // A Pager tab's dump temp file would otherwise leak here, and
+                    // (because layout ids restart at 1 for a re-added branch) later
+                    // be orphaned via session-name reuse (#124).
+                    self.forget_dump_file(&tab.session);
                     if self.active_session.as_deref() == Some(tab.session.as_str()) {
                         self.active_session = None;
                     }
@@ -1481,6 +1522,155 @@ impl App {
         };
         self.status = Some(status);
     }
+
+    /// Dumps the ACTIVE tab's full scrollback to a wtcc-owned temp file and opens
+    /// it in `$PAGER` (or `$EDITOR`/`$VISUAL` when `editor`) inside a NEW, ephemeral
+    /// Pager tab of the current worktree, so the host TUI is never suspended (#124).
+    /// `rows`/`cols` are the live agent-pane geometry for the spawned viewer PTY.
+    ///
+    /// SECURITY (this app's #1 rule): the viewer runs as an explicit argv VECTOR and
+    /// the dumped file path is a DISCRETE trailing argv element — never interpolated
+    /// into a shell string, and NOT routed through tmux/`$SHELL -c` (which would
+    /// shell-parse the path). `viewer_argv` whitespace-splits the user-trusted
+    /// `$PAGER`/`$EDITOR` config; the file, a separate argv element, carries no
+    /// injection surface. The temp file is unlinked when its tab closes (`close_tab`)
+    /// or the app drops (`Drop`).
+    pub fn dump_scrollback(&mut self, editor: bool, rows: u16, cols: u16) {
+        let argv = Self::resolve_viewer(editor);
+        self.dump_to_viewer(argv, editor, rows, cols);
+    }
+
+    /// Resolves the viewer argv from the environment: pager => `$PAGER`
+    /// (blank → `less -R`); editor => `$VISUAL`, then `$EDITOR` (blank → `vi`).
+    /// Kept env-only so tests can inject an argv via `dump_to_viewer` without
+    /// mutating process env (which is UB under multithreaded test runs).
+    fn resolve_viewer(editor: bool) -> Vec<String> {
+        let (value, fallback) = if editor {
+            let visual = std::env::var("VISUAL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| std::env::var("EDITOR").ok())
+                .unwrap_or_default();
+            (visual, "vi")
+        } else {
+            (std::env::var("PAGER").unwrap_or_default(), "less -R")
+        };
+        crate::session::viewer_argv(&value, fallback)
+    }
+
+    /// Snapshots the active session's scrollback into a private temp file and
+    /// spawns `argv` (with the file appended as a discrete trailing arg) in a new
+    /// Pager tab. `editor` only picks the status wording. The file may contain
+    /// sensitive terminal output (tokens, secrets), so it is created 0600 in a
+    /// 0700 dir. The file is unlinked when its tab closes (`close_tab`) or the app
+    /// drops (`Drop`).
+    fn dump_to_viewer(&mut self, argv: Vec<String>, editor: bool, rows: u16, cols: u16) {
+        // Snapshot the CURRENT active session's scrollback BEFORE creating any tab.
+        let lines = match self
+            .active_session
+            .clone()
+            .and_then(|name| self.session_manager.get(&name))
+        {
+            Some(session) => session.scrollback_lines(),
+            None => {
+                self.status = Some("no active session to dump".to_string());
+                return;
+            }
+        };
+        let Some(slug) = self.current_slug() else {
+            self.status = Some("no worktree selected".to_string());
+            return;
+        };
+        let Some(path) = self.current_worktree().map(|w| w.path.clone()) else {
+            self.status = Some("no worktree selected".to_string());
+            return;
+        };
+
+        // The shared, predictable `$TMPDIR/wtcc/` dir is created 0700 so a dump
+        // that may contain secrets is never exposed to other users on the host.
+        let dir = std::env::temp_dir().join("wtcc");
+        if let Err(e) = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+        {
+            self.status = Some(format!("dump failed: {e}"));
+            return;
+        }
+        let n = self.dump_counter;
+        self.dump_counter += 1;
+        // Fold the PID in so two wtcc instances dumping the same worktree cannot
+        // clobber each other's file; `dump_counter` disambiguates within a process.
+        let temp_path = dir.join(format!(
+            "wtcc-scroll-{slug}-{pid}-{n}.txt",
+            pid = std::process::id()
+        ));
+        let mut content = lines.join("\n");
+        content.push('\n');
+        // 0600: the dump can hold sensitive terminal output, so it is created
+        // owner-only rather than at the umask-default 0644.
+        let write_result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temp_path)
+            .and_then(|mut f| f.write_all(content.as_bytes()));
+        if let Err(e) = write_result {
+            self.status = Some(format!("dump failed: {e}"));
+            return;
+        }
+
+        let name = self
+            .layouts
+            .entry(slug.clone())
+            .or_insert_with(|| WorktreeLayout::new(&slug))
+            .add_pager_tab(&slug);
+
+        let mut cmd = portable_pty::CommandBuilder::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        cmd.arg(&temp_path);
+
+        if let Err(e) = self
+            .session_manager
+            .insert_spawned(&name, cmd, &path, rows, cols)
+        {
+            // Roll back the ephemeral tab and unlink the temp file on spawn failure.
+            if let Some(layout) = self.layouts.get_mut(&slug) {
+                layout.close_active();
+            }
+            let _ = std::fs::remove_file(&temp_path);
+            self.status = Some(format!("pager spawn failed: {e}"));
+            return;
+        }
+
+        self.active_session = Some(name.clone());
+        self.dump_files.insert(name, temp_path);
+        self.focus = Focus::Agent;
+        self.status = Some(if editor {
+            "scrollback → editor".to_string()
+        } else {
+            "scrollback → pager".to_string()
+        });
+    }
+
+    /// Unlinks and forgets a tracked scrollback-dump temp file for `session`, if
+    /// any. Best-effort (#124): a stale file that is already gone is a no-op.
+    fn forget_dump_file(&mut self, session: &str) {
+        if let Some(p) = self.dump_files.remove(session) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Unlinks any live scrollback-dump temp files on shutdown (#124), a best-effort
+/// sweep for tabs still open at exit. Errors are ignored; empty in tests.
+impl Drop for App {
+    fn drop(&mut self) {
+        for path in self.dump_files.values() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1605,6 +1795,9 @@ mod tests {
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,
+            dump_counter: 0,
+            dump_files: HashMap::new(),
+            last_pane_size: (24, 80),
         };
         app.selected_worktree = Some(0);
         app
@@ -1882,6 +2075,9 @@ mod tests {
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,
+            dump_counter: 0,
+            dump_files: HashMap::new(),
+            last_pane_size: (24, 80),
         }
     }
 
@@ -2229,6 +2425,9 @@ mod tests {
             vcs_status: HashMap::new(),
             vcs_provider: Arc::new(GitGhProvider),
             vcs_rx: None,
+            dump_counter: 0,
+            dump_files: HashMap::new(),
+            last_pane_size: (24, 80),
         };
         app.refresh_worktrees();
         app
@@ -2754,6 +2953,102 @@ mod tests {
             !app.layouts.contains_key(&app.worktree_key(0, "main")),
             "no layout is seeded when the dir is missing"
         );
+    }
+
+    // --- issue #124: dump scrollback to a pager tab -------------------------
+
+    #[test]
+    fn dump_scrollback_writes_file_adds_pager_tab_and_close_cleans_up() {
+        use portable_pty::CommandBuilder;
+
+        let mut app = app_with_fake_worktrees(); // main selected
+        let cwd = std::env::temp_dir();
+        app.worktrees[0].path = cwd.clone();
+
+        // Pre-seed an active agent session carrying real scrollback content.
+        let agent = SessionManager::session_name(&app.worktree_key(0, "main"));
+        let mut a = CommandBuilder::new("sh");
+        a.args(["-c", "seq 1 60"]);
+        app.session_manager
+            .insert_spawned(&agent, a, &cwd, 5, 20)
+            .unwrap();
+        app.active_session = Some(agent.clone());
+        for _ in 0..40 {
+            if app
+                .session_manager
+                .get(&agent)
+                .unwrap()
+                .scrollback_lines()
+                .iter()
+                .any(|l| l.contains("60"))
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Inject `cat` as the viewer (prints its file and exits, no hang) instead
+        // of mutating $PAGER — process-env mutation is UB under the multithreaded
+        // test runner. `dump_to_viewer` is the same path `dump_scrollback` takes
+        // once the viewer is resolved.
+        app.dump_to_viewer(vec!["cat".to_string()], false, 5, 40);
+
+        // A focused Pager tab was added for the current worktree.
+        let key = app.worktree_key(0, "main");
+        let pager = {
+            let tab = app.layouts.get(&key).expect("layout seeded").active_tab();
+            assert_eq!(tab.kind, crate::layout::TabKind::Pager);
+            tab.session.clone()
+        };
+        assert_eq!(
+            app.active_session.as_deref(),
+            Some(pager.as_str()),
+            "the pager tab becomes the active session"
+        );
+
+        // The temp file exists, is tracked, and holds the scrollback content.
+        let temp = app
+            .dump_files
+            .get(&pager)
+            .expect("dump file is tracked")
+            .clone();
+        assert!(temp.exists(), "the dump temp file was written");
+        let body = std::fs::read_to_string(&temp).unwrap();
+        assert!(body.contains("60"), "dumped file holds scrollback content");
+
+        // Closing the tab unlinks the temp file and drops the tracking entry.
+        app.close_tab();
+        assert!(!temp.exists(), "close_tab unlinks the dump file");
+        assert!(!app.dump_files.contains_key(&pager));
+
+        app.session_manager.kill(&agent);
+    }
+
+    #[test]
+    fn dump_scrollback_without_active_session_sets_status_and_no_tab() {
+        let mut app = app_with_fake_worktrees();
+        app.active_session = None;
+        app.dump_scrollback(false, 5, 40);
+        assert_eq!(app.status.as_deref(), Some("no active session to dump"));
+        assert!(
+            !app.layouts.contains_key(&app.worktree_key(0, "main")),
+            "no pager tab is created without an active session"
+        );
+    }
+
+    #[test]
+    fn drop_unlinks_tracked_dump_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wtcc-scroll-drop-0.txt");
+        std::fs::write(&file, "content\n").unwrap();
+        assert!(file.exists());
+
+        let mut app = App::new(Config::default());
+        app.dump_files
+            .insert("wtcc-pager-x-p1".to_string(), file.clone());
+        drop(app);
+
+        assert!(!file.exists(), "Drop unlinks every tracked dump file");
     }
 
     #[test]
