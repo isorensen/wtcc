@@ -74,10 +74,24 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
         .then_some(session)
         .flatten()
         .map(|s| s.scrollback_view());
+    // An active search replaces the `[cur/max]` scroll indicator with a `/query`
+    // search indicator (#123).
+    let search = scroll.then_some(app.search.as_ref()).flatten();
     let title = match app.current_worktree() {
-        Some(wt) if !wt.branch.is_empty() => match scroll_view {
-            Some((cur, max)) => format!(" agent · {} — SCROLL [{cur}/{max}] ", wt.branch),
-            None => format!(" agent · {} ", wt.branch),
+        Some(wt) if !wt.branch.is_empty() => match (search, scroll_view) {
+            (Some(s), _) => {
+                let suffix = if s.editing {
+                    format!("/{}", s.query)
+                } else if s.matches.is_empty() {
+                    format!("/{} [no match]", s.query)
+                } else {
+                    let cur = s.current.map_or(0, |i| i + 1);
+                    format!("/{} [{}/{}]", s.query, cur, s.matches.len())
+                };
+                format!(" agent · {} — SEARCH {suffix} ", wt.branch)
+            }
+            (None, Some((cur, max))) => format!(" agent · {} — SCROLL [{cur}/{max}] ", wt.branch),
+            (None, None) => format!(" agent · {} ", wt.branch),
         },
         _ => " agent ".to_string(),
     };
@@ -128,6 +142,49 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
     // keypress instead (same rationale as the scrollback view in #106).
     if let Some(sel) = app.selection {
         overlay_selection(sel, area, buf);
+    }
+
+    // Highlight every visible occurrence of the active search query on top of the
+    // surface (#123), mirroring `overlay_selection`'s cell math.
+    if let Some(s) = search
+        && !s.query.is_empty()
+    {
+        overlay_search_highlights(app, &s.query, area, buf);
+    }
+}
+
+/// Reverses the cells of every visible smart-case occurrence of `query` on the
+/// active session's surface (#123). Highlight columns are computed from the SAME
+/// row strings vt100 renders (char index == cell column for plain agent rows),
+/// so they stay aligned regardless of the scrollback snapshot's absolute-line
+/// indices. Mirrors [`overlay_selection`]'s surface origin and bounds-guarding;
+/// a no-op when no session is active.
+fn overlay_search_highlights(app: &App, query: &str, area: Rect, buf: &mut Buffer) {
+    let Some(session) = app
+        .active_session
+        .as_deref()
+        .and_then(|n| app.session_manager.get(n))
+    else {
+        return;
+    };
+    let cols = area.width.saturating_sub(2);
+    let x0 = area.x + 1;
+    let y0 = area.y + 1 + TAB_BAR_HEIGHT;
+    let reversed = Style::default().add_modifier(Modifier::REVERSED);
+    let rows: Vec<String> = {
+        let parser = session.parser().lock().unwrap();
+        parser.screen().rows(0, cols).collect()
+    };
+    let qlen = query.chars().count();
+    for (r, row) in rows.iter().enumerate() {
+        for start in crate::session::match_columns(row, query) {
+            for c in start..start + qlen {
+                let cell = buf.cell_mut((x0 + c as u16, y0 + r as u16));
+                if let Some(cell) = cell {
+                    cell.set_style(reversed);
+                }
+            }
+        }
     }
 }
 
