@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-08
+
 ### Added
 - **Dump the agent scrollback to `$PAGER` / `$EDITOR`**: press `P` (or the command palette)
   to write the active tab's full scrollback to a temporary file and open it in `$PAGER`
