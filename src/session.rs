@@ -206,6 +206,89 @@ pub(crate) fn scrollback_bounds(screen: &mut vt100::Screen) -> (usize, usize) {
     (cur, max)
 }
 
+/// Snapshots EVERY logical line of the scrollback plus the visible screen into
+/// plain strings, oldest first, restoring the original offset before returning
+/// (#123). vt100 exposes only the visible window, so we walk the scrollback
+/// offset from the oldest retained line (`max`) down to the live bottom, reading
+/// the TOP visible row at each step, then append the remaining current-screen
+/// rows. Pure over the passed screen: unit-testable against a hand-fed `Parser`
+/// without a PTY. `max == 0` yields exactly the visible screen (`rows` lines).
+pub(crate) fn scrollback_lines(screen: &mut vt100::Screen) -> Vec<String> {
+    let (rows, cols) = screen.size();
+    let cur = screen.scrollback();
+    let (_, max) = scrollback_bounds(screen);
+    let mut lines: Vec<String> = Vec::with_capacity(max + rows as usize);
+    // At offset `k` the top visible row is absolute line `max - k`, so walking
+    // `k` from `max` down to `0` yields lines `0..=max` oldest-first.
+    for k in (0..=max).rev() {
+        screen.set_scrollback(k);
+        if let Some(top) = screen.rows(0, cols).next() {
+            lines.push(top);
+        }
+    }
+    // At offset 0 the top row (`max`) was already captured; append the rest of
+    // the current screen (`max+1 ..= max+rows-1`).
+    screen.set_scrollback(0);
+    lines.extend(screen.rows(0, cols).skip(1));
+    screen.set_scrollback(cur);
+    lines
+}
+
+/// Char-column start offsets of every smart-case, non-overlapping occurrence of
+/// `query` in `row` (#123). Char index equals cell column for the plain agent
+/// rows this highlights. Smart-case: case-insensitive when `query` has no
+/// uppercase, case-sensitive otherwise. Empty query → no spans.
+pub(crate) fn match_columns(row: &str, query: &str) -> Vec<usize> {
+    let needle: Vec<char> = query.chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let case_sensitive = needle.iter().any(|c| c.is_uppercase());
+    let hay: Vec<char> = row.chars().collect();
+    let n = needle.len();
+    let eq = |a: char, b: char| {
+        if case_sensitive {
+            a == b
+        } else {
+            a.eq_ignore_ascii_case(&b)
+        }
+    };
+    let mut cols = Vec::new();
+    let mut i = 0;
+    while i + n <= hay.len() {
+        if (0..n).all(|j| eq(hay[i + j], needle[j])) {
+            cols.push(i);
+            i += n;
+        } else {
+            i += 1;
+        }
+    }
+    cols
+}
+
+/// Indices of `lines` containing `query`, smart-case (#123). Shares
+/// [`match_columns`]'s matcher so the lines reported here are exactly the ones
+/// that render a highlight. Empty query → empty vec.
+pub fn find_matches(lines: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !match_columns(l, query).is_empty())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The scrollback offset that brings absolute `line` to the viewport top (#123).
+/// At offset `k` the visible window is lines `[total-rows-k, total-1-k]`, so
+/// `top == line` gives `k = total - rows - line` (saturating; the real value is
+/// clamped by `set_scrollback` when applied).
+pub fn offset_for_line(line: usize, total: usize, rows: usize) -> usize {
+    total.saturating_sub(rows).saturating_sub(line)
+}
+
 /// How long a session must stay quiet before it counts as needing attention.
 /// The same fixed threshold for every session — intentionally not configurable.
 pub const ATTENTION_QUIET: Duration = Duration::from_secs(10);
@@ -422,6 +505,22 @@ impl Session {
     /// feeding the SCROLL-mode pane title `[cur/max]` indicator (#122).
     pub fn scrollback_view(&self) -> (usize, usize) {
         scrollback_bounds(self.parser.lock().unwrap().screen_mut())
+    }
+
+    /// Snapshots every logical scrollback line for an in-scroll-mode search
+    /// (#123). Locks the parser and delegates to the pure [`scrollback_lines`],
+    /// which restores the live offset before returning.
+    pub fn scrollback_lines(&self) -> Vec<String> {
+        scrollback_lines(self.parser.lock().unwrap().screen_mut())
+    }
+
+    /// Scrolls so the absolute `line` (into a [`scrollback_lines`] snapshot of
+    /// length `total`) sits at the viewport top (#123). vt100 clamps the offset.
+    pub fn jump_to_line(&self, line: usize, total: usize) {
+        let mut p = self.parser.lock().unwrap();
+        let rows = p.screen().size().0 as usize;
+        p.screen_mut()
+            .set_scrollback(offset_for_line(line, total, rows));
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
@@ -745,6 +844,92 @@ mod tests {
             5,
             "the probe restores the non-zero offset it found"
         );
+    }
+
+    // --- issue #123: in-scroll-mode incremental search ----------------------
+    //
+    // The search primitives are pure over a vt100 screen / plain data, so they
+    // are unit-testable against a hand-fed `Parser` with no PTY.
+
+    #[test]
+    fn scrollback_lines_snapshots_every_line_in_order_and_restores_offset() {
+        let mut parser = Parser::new(5, 20, SCROLLBACK_LINES);
+        for i in 0..40 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().scrollback(), 0, "starts at the live bottom");
+
+        let lines = scrollback_lines(parser.screen_mut());
+        assert_eq!(
+            parser.screen().scrollback(),
+            0,
+            "the snapshot restores the original offset"
+        );
+        let content: Vec<String> = lines
+            .iter()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let expected: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        assert_eq!(content, expected, "every line is captured oldest-first");
+
+        // From a non-zero offset the snapshot still restores where it started.
+        parser.screen_mut().set_scrollback(3);
+        let _ = scrollback_lines(parser.screen_mut());
+        assert_eq!(
+            parser.screen().scrollback(),
+            3,
+            "the snapshot restores a non-zero starting offset"
+        );
+    }
+
+    #[test]
+    fn scrollback_lines_with_no_history_is_the_visible_screen() {
+        // Fewer lines than the 5-row screen holds => max == 0 => exactly `rows`.
+        let mut parser = Parser::new(5, 20, SCROLLBACK_LINES);
+        parser.process(b"only line\r\n");
+        let lines = scrollback_lines(parser.screen_mut());
+        assert_eq!(lines.len(), 5, "max == 0 yields exactly the visible rows");
+        assert!(lines.iter().any(|l| l.trim() == "only line"));
+    }
+
+    #[test]
+    fn find_matches_is_smart_case_and_empty_query_matches_nothing() {
+        let lines = vec![
+            "Hello World".to_string(),
+            "hello there".to_string(),
+            "HELLO".to_string(),
+            "goodbye".to_string(),
+        ];
+        // All-lowercase query => case-insensitive: matches every "hello" variant.
+        assert_eq!(find_matches(&lines, "hello"), vec![0, 1, 2]);
+        // A query with uppercase => case-sensitive.
+        assert_eq!(find_matches(&lines, "Hello"), vec![0]);
+        // Empty query matches nothing; a miss returns empty.
+        assert!(find_matches(&lines, "").is_empty());
+        assert!(find_matches(&lines, "zzz").is_empty());
+    }
+
+    #[test]
+    fn match_columns_finds_smart_case_non_overlapping_occurrences() {
+        assert_eq!(match_columns("abcabc", "bc"), vec![1, 4]);
+        // Lowercase query => case-insensitive; every column preserved.
+        assert_eq!(match_columns("aAaA", "a"), vec![0, 1, 2, 3]);
+        // Uppercase in query => case-sensitive.
+        assert_eq!(match_columns("aAaA", "A"), vec![1, 3]);
+        assert!(match_columns("abc", "").is_empty());
+    }
+
+    #[test]
+    fn offset_for_line_brings_a_line_to_the_top_with_saturating_clamp() {
+        // total=40, rows=5: the oldest line needs the max offset.
+        assert_eq!(offset_for_line(0, 40, 5), 35);
+        // A line already at the live-bottom window maps to offset 0.
+        assert_eq!(offset_for_line(35, 40, 5), 0);
+        // A line past the bottom saturates to 0.
+        assert_eq!(offset_for_line(39, 40, 5), 0);
+        // Fewer lines than the screen holds => 0.
+        assert_eq!(offset_for_line(0, 3, 5), 0);
     }
 
     #[test]

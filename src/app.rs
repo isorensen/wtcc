@@ -48,6 +48,22 @@ impl Selection {
     }
 }
 
+/// In-scroll-mode incremental search over the agent scrollback (#123). Only
+/// meaningful while `term_mode == Scroll`; reset to `None` whenever scroll mode
+/// is entered or left. `matches` and `current` are computed once on submit and
+/// reused by `n`/`N` navigation — never recomputed per keystroke.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Search {
+    pub query: String,
+    /// `true` while typing the query; `false` once submitted and navigating results.
+    pub editing: bool,
+    /// Absolute line indices (into the scrollback snapshot) that contain the
+    /// query, sorted ascending.
+    pub matches: Vec<usize>,
+    /// Index into `matches` of the focused match, if any.
+    pub current: Option<usize>,
+}
+
 /// How long an ARCHIVE script may run before it is killed so worktree removal can
 /// proceed. A crude bound: the run is synchronous, so this caps how long a
 /// hanging user script can freeze the UI.
@@ -211,6 +227,9 @@ pub struct App {
     /// Whether the agent pane forwards keys live to the PTY or is in modal
     /// scrollback navigation (#122). Reset to `Live` whenever focus toggles.
     pub term_mode: TermMode,
+    /// Active in-scroll-mode search (#123), or `None` when not searching. Only
+    /// meaningful while `term_mode == Scroll`; cleared on entering/leaving scroll.
+    pub search: Option<Search>,
     /// Per-worktree tab layouts (issue #48), keyed by branch slug. In-memory only
     /// (KNOWN GAP: not persisted, so shell tabs are lost on restart; the agent tab
     /// persists via its named tmux session). Lazily created on first use.
@@ -314,6 +333,7 @@ impl App {
             session_manager: SessionManager::new(),
             active_session: None,
             term_mode: TermMode::Live,
+            search: None,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -901,6 +921,7 @@ impl App {
         // mouse-wheel scrollback offset (#106) — do not snap.
         if self.term_mode == TermMode::Scroll {
             self.term_mode = TermMode::Live;
+            self.search = None;
             if let Some(name) = self.active_session.clone()
                 && let Some(session) = self.session_manager.get(&name)
             {
@@ -919,6 +940,7 @@ impl App {
         }
         self.term_mode = TermMode::Scroll;
         self.status = None;
+        self.search = None;
         if let Some(name) = self.active_session.clone()
             && let Some(session) = self.session_manager.get(&name)
         {
@@ -931,6 +953,7 @@ impl App {
     /// active session's view back to the live bottom.
     pub fn exit_scroll_mode(&mut self) {
         self.term_mode = TermMode::Live;
+        self.search = None;
         if let Some(name) = self.active_session.clone()
             && let Some(session) = self.session_manager.get(&name)
         {
@@ -1574,6 +1597,7 @@ mod tests {
             session_manager: SessionManager::new(),
             active_session: None,
             term_mode: TermMode::Live,
+            search: None,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -1850,6 +1874,7 @@ mod tests {
             session_manager: SessionManager::new(),
             active_session: None,
             term_mode: TermMode::Live,
+            search: None,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: Some(config_path),
@@ -2196,6 +2221,7 @@ mod tests {
             session_manager: SessionManager::new(),
             active_session: None,
             term_mode: TermMode::Live,
+            search: None,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -3555,6 +3581,40 @@ mod tests {
         let mut app = App::new(Config::default());
         app.term_mode = TermMode::Scroll;
         app.toggle_focus();
+        assert_eq!(app.term_mode, TermMode::Live);
+    }
+
+    // --- issue #123: in-scroll-mode search state ----------------------------
+
+    #[test]
+    fn search_defaults_to_none() {
+        let app = App::new(Config::default());
+        assert!(app.search.is_none());
+    }
+
+    #[test]
+    fn enter_scroll_mode_clears_stale_search() {
+        let mut app = App::new(Config::default());
+        // A stale search from a prior scroll session must not survive re-entry.
+        app.active_session = Some("wtcc-x".to_string());
+        app.search = Some(Search {
+            query: "foo".to_string(),
+            ..Default::default()
+        });
+        app.enter_scroll_mode();
+        assert!(app.search.is_none());
+    }
+
+    #[test]
+    fn exit_scroll_mode_clears_search() {
+        let mut app = App::new(Config::default());
+        app.term_mode = TermMode::Scroll;
+        app.search = Some(Search {
+            query: "foo".to_string(),
+            ..Default::default()
+        });
+        app.exit_scroll_mode();
+        assert!(app.search.is_none());
         assert_eq!(app.term_mode, TermMode::Live);
     }
 }

@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Incremental search in the agent scrollback**: while in scroll mode, press `/` to search.
+  Type a query (smart-case: lowercase matches any case, mixed-case is case-sensitive), press
+  `Enter` to jump to the nearest match, and use `n`/`N` to step to the next/previous match
+  (wrapping). All on-screen matches are highlighted; the pane title shows `/<query> [i/N]`
+  (or `[no match]`). Navigation re-scans the live buffer each step so it stays correct even
+  after the scrollback ring evicts old lines. `Esc` cancels the search; `Ctrl-C` leaves scroll
+  mode. (#123)
 - **Keyboard scrollback navigation in the agent pane**: press `Ctrl-↑` (or `Shift-PageUp`)
   to enter an explicit modal scroll mode instead of only being able to wheel with the mouse.
   In scroll mode `j`/`k` move by line, `Ctrl-d`/`Ctrl-u` (or `PageDown`/`PageUp`) by page,

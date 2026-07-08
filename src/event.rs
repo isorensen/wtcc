@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection, TermMode};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt, Search, Selection, TermMode};
 use crate::keymap::{self, AGENT, Action, PRIMARY, SCROLL};
 use crate::repository::Repository;
 use crate::ui::palette;
@@ -357,6 +357,24 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
 /// borrow; every other action drives the active session's vt100 view without
 /// mutating `app`.
 fn handle_scroll_mode(app: &mut App, key: KeyEvent) {
+    // The `/` search sub-mode (#123) is handled before the SCROLL keymap so
+    // typing, submit, and n/N navigation take precedence. When a search is
+    // active but consumes nothing (a scroll chord while navigating results), we
+    // fall through to the normal SCROLL dispatch below so j/k/g/G still scroll.
+    if app.search.is_some() {
+        if handle_search_key(app, key) {
+            return;
+        }
+    } else if matches!(key.code, KeyCode::Char('/'))
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        app.search = Some(Search {
+            editing: true,
+            ..Default::default()
+        });
+        return;
+    }
+
     let Some(action) = keymap::dispatch(SCROLL, key) else {
         return;
     };
@@ -382,6 +400,166 @@ fn handle_scroll_mode(app: &mut App, key: KeyEvent) {
         Action::ScrollTop => session.scroll_to_top(),
         Action::ScrollBottom => session.scroll_to_bottom(),
         _ => {}
+    }
+}
+
+/// Handles a key while a `/` search is active in scroll mode (#123). Returns
+/// `true` when the key was consumed by the search UI; `false` lets the caller
+/// fall through to the normal SCROLL keymap (so j/k/g/G still scroll while
+/// results persist). All `&mut app` transitions happen before any `&Session`
+/// borrow, mirroring #122.
+fn handle_search_key(app: &mut App, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-C is the scroll-mode exit convention (SCROLL keymap → ScrollExit); it
+    // must escape both search sub-modes, not just fall into the editing no-op arm.
+    // Esc keeps its narrower meaning (cancel the query, stay in scroll).
+    if ctrl && matches!(key.code, KeyCode::Char('c')) {
+        app.exit_scroll_mode();
+        return true;
+    }
+    let editing = app.search.as_ref().is_some_and(|s| s.editing);
+    if editing {
+        match key.code {
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(s) = app.search.as_mut() {
+                    s.query.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(s) = app.search.as_mut() {
+                    s.query.pop();
+                }
+            }
+            KeyCode::Enter => submit_search(app),
+            KeyCode::Esc => app.search = None,
+            _ => {}
+        }
+        // While editing, every key is modal — nothing falls through to scroll.
+        true
+    } else {
+        match key.code {
+            KeyCode::Char('n') if !ctrl => advance_search(app, true),
+            KeyCode::Char('N') if !ctrl => advance_search(app, false),
+            KeyCode::Char('/') if !ctrl => {
+                // Reopen editing with a fresh query, dropping prior results.
+                if let Some(s) = app.search.as_mut() {
+                    *s = Search {
+                        editing: true,
+                        ..Default::default()
+                    };
+                }
+            }
+            KeyCode::Esc => app.search = None,
+            // Any other key (j/k/g/G, paging) falls through to SCROLL.
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Submits the typed query (#123): snapshots the active session's scrollback,
+/// computes smart-case matches, and jumps to the nearest match at/below the
+/// current viewport line (wrapping to the first). No match leaves `current`
+/// cleared so the title shows `[no match]`. The `&Session` snapshot borrow is
+/// released before any `&mut app` mutation.
+fn submit_search(app: &mut App) {
+    let query = match app.search.as_ref() {
+        Some(s) => s.query.clone(),
+        None => return,
+    };
+    let computed = app
+        .active_session
+        .clone()
+        .and_then(|name| app.session_manager.get(&name))
+        .map(|session| {
+            let lines = session.scrollback_lines();
+            let total = lines.len();
+            let matches = crate::session::find_matches(&lines, &query);
+            let (cur_offset, _max) = session.scrollback_view();
+            (matches, total, cur_offset, session.view_rows())
+        });
+    let Some((matches, total, cur_offset, rows)) = computed else {
+        // No active session: mark submitted with no results.
+        if let Some(s) = app.search.as_mut() {
+            s.editing = false;
+            s.matches.clear();
+            s.current = None;
+        }
+        return;
+    };
+    // The line currently at the viewport top (see `offset_for_line`'s window).
+    let current_top = total.saturating_sub(rows).saturating_sub(cur_offset);
+    let target =
+        (!matches.is_empty()).then(|| matches.iter().position(|&l| l >= current_top).unwrap_or(0));
+    let jump = target.map(|idx| matches[idx]);
+    if let Some(s) = app.search.as_mut() {
+        s.editing = false;
+        s.matches = matches;
+        s.current = target;
+    }
+    if let Some(line) = jump
+        && let Some(name) = app.active_session.clone()
+        && let Some(session) = app.session_manager.get(&name)
+    {
+        session.jump_to_line(line, total);
+    }
+}
+
+/// Moves the focused match by one (`forward` = `n`, else `N`), wrapping, and
+/// jumps the view to it (#123). Re-snapshots the LIVE scrollback each time and
+/// chooses the next/previous match relative to the CURRENT viewport top — never
+/// reuses submit-time indices, which drift once the 5000-line cap starts
+/// evicting old lines (vt100 offsets are distance-from-live-edge, not identity).
+/// No-op when the query is empty; clears results when nothing matches. Mirrors
+/// #122 borrow discipline: read the snapshot into owned values, mutate
+/// `app.search`, then re-borrow the session only for the final jump.
+fn advance_search(app: &mut App, forward: bool) {
+    let query = match app.search.as_ref() {
+        Some(s) if !s.query.is_empty() => s.query.clone(),
+        _ => return,
+    };
+    let snapshot = app
+        .active_session
+        .clone()
+        .and_then(|name| app.session_manager.get(&name))
+        .map(|session| {
+            let lines = session.scrollback_lines();
+            let total = lines.len();
+            let rows = session.view_rows();
+            let cur_offset = session.scrollback_view().0;
+            let matches = crate::session::find_matches(&lines, &query);
+            (matches, total, rows, cur_offset)
+        });
+    let Some((matches, total, rows, cur_offset)) = snapshot else {
+        return;
+    };
+    if matches.is_empty() {
+        if let Some(s) = app.search.as_mut() {
+            s.matches = Vec::new();
+            s.current = None;
+        }
+        return;
+    }
+    // Absolute index of the line currently at the viewport top.
+    let current_top = total.saturating_sub(rows).saturating_sub(cur_offset);
+    // Strict `>`/`<` so `n` always advances off the current line and `N` retreats.
+    let target = if forward {
+        matches.iter().position(|&l| l > current_top).unwrap_or(0)
+    } else {
+        matches
+            .iter()
+            .rposition(|&l| l < current_top)
+            .unwrap_or(matches.len() - 1)
+    };
+    let line = matches[target];
+    if let Some(s) = app.search.as_mut() {
+        s.matches = matches;
+        s.current = Some(target);
+    }
+    if let Some(name) = app.active_session.clone()
+        && let Some(session) = app.session_manager.get(&name)
+    {
+        session.jump_to_line(line, total);
     }
 }
 
@@ -1631,6 +1809,243 @@ mod tests {
         handle_key(&mut a, key(KeyCode::Esc));
         assert_eq!(a.term_mode, TermMode::Live);
         assert_eq!(scrollback(&a), 0);
+    }
+
+    /// issue #123: `/` search inside scroll mode finds matches, jumps the view,
+    /// navigates with `n`, reports `[no match]`, and cancels with Esc — all
+    /// against a live PTY session, mirroring the #122 wiring test.
+    #[test]
+    fn search_in_scroll_mode_finds_navigates_and_cancels() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-123-search-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 5, 20)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+        a.focus = Focus::Agent;
+
+        let offset = |a: &App| {
+            a.session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback()
+        };
+        // Wait until output exceeds the 5-row screen so history exists to search.
+        for _ in 0..40 {
+            let has = a
+                .session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("60");
+            if has {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Enter scroll mode, then open search, type "5", and submit.
+        handle_key(&mut a, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(a.term_mode, TermMode::Scroll);
+
+        handle_key(&mut a, key(KeyCode::Char('/')));
+        assert!(
+            a.search.as_ref().is_some_and(|s| s.editing),
+            "/ opens editing"
+        );
+
+        handle_key(&mut a, key(KeyCode::Char('5')));
+        handle_key(&mut a, key(KeyCode::Enter));
+        let s = a.search.as_ref().unwrap();
+        assert!(!s.editing, "Enter submits and leaves editing");
+        assert!(!s.matches.is_empty(), "'5' matches several lines");
+        let focused = s.current.expect("a match is focused on submit");
+
+        // The submit jumped the view so the focused match sits at the viewport top.
+        let focused_line = s.matches[focused];
+        let sess = a.session_manager.get(name).unwrap();
+        let total = sess.scrollback_lines().len();
+        let expected = crate::session::offset_for_line(focused_line, total, sess.view_rows())
+            .min(sess.scrollback_view().1);
+        assert_eq!(offset(&a), expected, "submit brings a match into view");
+
+        // `n` advances the focused match (wrapping).
+        let before = a.search.as_ref().unwrap().current.unwrap();
+        handle_key(&mut a, key(KeyCode::Char('n')));
+        assert_ne!(
+            a.search.as_ref().unwrap().current.unwrap(),
+            before,
+            "n moves to the next match"
+        );
+
+        // Re-open and search a query that matches nothing -> [no match] state.
+        handle_key(&mut a, key(KeyCode::Char('/')));
+        assert!(a.search.as_ref().unwrap().editing);
+        handle_key(&mut a, key(KeyCode::Char('z')));
+        handle_key(&mut a, key(KeyCode::Enter));
+        let s = a.search.as_ref().unwrap();
+        assert!(!s.editing);
+        assert!(s.matches.is_empty(), "no line contains 'z'");
+        assert!(s.current.is_none(), "no match => no focused match");
+
+        // Esc closes the search but stays in scroll mode.
+        handle_key(&mut a, key(KeyCode::Esc));
+        assert!(a.search.is_none());
+        assert_eq!(
+            a.term_mode,
+            TermMode::Scroll,
+            "closing search stays in scroll"
+        );
+    }
+
+    /// Drives `n`/`N` against a live PTY and asserts the view offset actually
+    /// moves to each match's expected offset, and that navigation wraps at both
+    /// ends. Guards the #123 drift-free rewrite: navigation is derived from a
+    /// fresh snapshot relative to the current viewport, not stored indices.
+    #[test]
+    fn search_navigation_moves_offset_and_wraps() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-123-nav-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 5, 20)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+        a.focus = Focus::Agent;
+
+        let offset = |a: &App| {
+            a.session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback()
+        };
+        for _ in 0..40 {
+            let has = a
+                .session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("60");
+            if has {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // Enter scroll mode and submit "1" — it matches many of 1..60
+        // (1, 10..19, 21, 31, 41, 51), all sitting in mid-history so their
+        // offsets are distinct and non-clamped.
+        handle_key(&mut a, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+        handle_key(&mut a, key(KeyCode::Char('/')));
+        handle_key(&mut a, key(KeyCode::Char('1')));
+        handle_key(&mut a, key(KeyCode::Enter));
+
+        let m = a.search.as_ref().unwrap().matches.clone();
+        assert!(m.len() >= 3, "'1' matches several lines");
+        let sess = a.session_manager.get(name).unwrap();
+        let total = sess.scrollback_lines().len();
+        let rows = sess.view_rows();
+        let max = sess.scrollback_view().1;
+        let exp_off = |line: usize| crate::session::offset_for_line(line, total, rows).min(max);
+
+        // `n` moves the view to the next match's offset (an exact mid-history hit).
+        let before = offset(&a);
+        handle_key(&mut a, key(KeyCode::Char('n')));
+        let after = a.search.as_ref().unwrap().current.unwrap();
+        assert_eq!(
+            offset(&a),
+            exp_off(m[after]),
+            "n jumps to the next match's offset"
+        );
+        assert_ne!(offset(&a), before, "n actually moved the view");
+
+        // Advance to the last match, then one more `n` wraps back to the first.
+        for _ in 0..m.len() {
+            if a.search.as_ref().unwrap().current == Some(m.len() - 1) {
+                break;
+            }
+            handle_key(&mut a, key(KeyCode::Char('n')));
+        }
+        assert_eq!(a.search.as_ref().unwrap().current, Some(m.len() - 1));
+        assert_eq!(offset(&a), exp_off(m[m.len() - 1]));
+        handle_key(&mut a, key(KeyCode::Char('n')));
+        assert_eq!(
+            a.search.as_ref().unwrap().current,
+            Some(0),
+            "n wraps past the last match to the first"
+        );
+        assert_eq!(
+            offset(&a),
+            exp_off(m[0]),
+            "wrap returns to the first match's offset"
+        );
+
+        // `N` from the first match wraps to the last.
+        handle_key(&mut a, key(KeyCode::Char('N')));
+        assert_eq!(
+            a.search.as_ref().unwrap().current,
+            Some(m.len() - 1),
+            "N from the first match wraps to the last"
+        );
+        assert_eq!(offset(&a), exp_off(m[m.len() - 1]));
+    }
+
+    /// Ctrl-C while typing a search query exits scroll mode entirely (returning to
+    /// Live and clearing `search`), matching the SCROLL keymap convention — not the
+    /// narrower Esc, which only cancels the query.
+    #[test]
+    fn search_editing_ctrl_c_exits_scroll_mode() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-123-ctrlc-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 5, 20)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+        a.focus = Focus::Agent;
+        a.term_mode = TermMode::Scroll;
+        a.search = Some(Search {
+            editing: true,
+            query: "5".to_string(),
+            ..Default::default()
+        });
+
+        handle_key(
+            &mut a,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            a.term_mode,
+            TermMode::Live,
+            "Ctrl-C exits scroll mode from the search editor"
+        );
+        assert!(a.search.is_none(), "Ctrl-C clears the search");
     }
 
     #[test]
