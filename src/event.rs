@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection};
-use crate::keymap::{self, AGENT, Action, PRIMARY};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection, TermMode};
+use crate::keymap::{self, AGENT, Action, PRIMARY, SCROLL};
 use crate::repository::Repository;
 use crate::ui::palette;
 use crate::ui::sidebar::{self, SidebarRow};
@@ -13,9 +13,11 @@ use crate::worktree::Worktree;
 /// falling back to the primary keymap. Pure state transition: no terminal I/O.
 ///
 /// Quit semantics: Ctrl-Q always quits. Ctrl-C quits only when focus is Sidebar
-/// or an overlay is open; when focus is Agent, Ctrl-C is forwarded to the agent.
-/// `q` quits only from Sidebar focus (printable char the agent needs). In Agent
-/// focus, Ctrl-O returns focus to Sidebar; all other keys forward to the agent.
+/// or an overlay is open. When focus is Agent and the pane is Live, Ctrl-C is
+/// forwarded to the agent; in scroll mode (TermMode::Scroll) it exits scroll mode
+/// instead (like Esc/q). `q` quits only from Sidebar focus (printable char the
+/// agent needs). In Agent focus, Ctrl-O returns focus to Sidebar; all other keys
+/// forward to the agent.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -41,7 +43,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     match &app.overlay {
         Overlay::None => {
             if app.focus == Focus::Agent {
-                handle_agent(app, key, ctrl);
+                if app.term_mode == TermMode::Scroll {
+                    handle_scroll_mode(app, key);
+                } else {
+                    handle_agent(app, key, ctrl);
+                }
             } else {
                 handle_primary(app, key);
             }
@@ -313,11 +319,19 @@ pub fn handle_scroll(app: &mut App, up: bool, col: u16) {
 }
 
 fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
-    // Ctrl-O returns focus to the sidebar (not forwarded); every other key
+    // Ctrl-O returns focus to the sidebar; the scroll-mode entry chords flip into
+    // modal scrollback navigation (#122). Neither is forwarded; every other key
     // falls through to the agent's PTY.
-    if matches!(keymap::dispatch(AGENT, key), Some(Action::FocusSidebar)) {
-        app.toggle_focus();
-        return;
+    match keymap::dispatch(AGENT, key) {
+        Some(Action::FocusSidebar) => {
+            app.toggle_focus();
+            return;
+        }
+        Some(Action::ScrollMode) => {
+            app.enter_scroll_mode();
+            return;
+        }
+        _ => {}
     }
     let Some(name) = app.active_session.clone() else {
         return;
@@ -335,6 +349,40 @@ fn handle_agent(app: &mut App, key: KeyEvent, ctrl: bool) {
         return;
     };
     let _ = session.write_input(&bytes);
+}
+
+/// Handles a key while the agent pane is in modal scrollback navigation (#122).
+/// Unbound keys are a deliberate no-op (modal). `ScrollExit` is handled first so
+/// the `app.exit_scroll_mode()` call never conflicts with a held `&Session`
+/// borrow; every other action drives the active session's vt100 view without
+/// mutating `app`.
+fn handle_scroll_mode(app: &mut App, key: KeyEvent) {
+    let Some(action) = keymap::dispatch(SCROLL, key) else {
+        return;
+    };
+    if action == Action::ScrollExit {
+        app.exit_scroll_mode();
+        return;
+    }
+    // A session that vanished mid-scroll (killed/removed out of band) leaves the
+    // scroll actions as pure no-ops — the explicit ScrollExit chords remain the
+    // only keyboard way out, so a key never silently drops the user back to Live.
+    let Some(name) = app.active_session.clone() else {
+        return;
+    };
+    let Some(session) = app.session_manager.get(&name) else {
+        return;
+    };
+    let page = session.view_rows().max(1);
+    match action {
+        Action::ScrollUp => session.scroll_up(1),
+        Action::ScrollDown => session.scroll_down(1),
+        Action::ScrollPageUp => session.scroll_up(page),
+        Action::ScrollPageDown => session.scroll_down(page),
+        Action::ScrollTop => session.scroll_to_top(),
+        Action::ScrollBottom => session.scroll_to_bottom(),
+        _ => {}
+    }
 }
 
 /// Translates a key into the byte sequence forwarded to the agent's PTY.
@@ -593,6 +641,16 @@ fn run_action(app: &mut App, action: Action) {
         Action::CloseTab => app.close_tab(),
         Action::NextTab => app.next_tab(),
         Action::PrevTab => app.prev_tab(),
+        // Scroll-mode actions are dispatched by `handle_scroll_mode`/`handle_agent`,
+        // never through the PRIMARY keymap or the palette that feed `run_action`.
+        Action::ScrollMode
+        | Action::ScrollUp
+        | Action::ScrollDown
+        | Action::ScrollPageUp
+        | Action::ScrollPageDown
+        | Action::ScrollTop
+        | Action::ScrollBottom
+        | Action::ScrollExit => {}
         Action::Quit => app.should_quit = true,
     }
 }
@@ -1462,6 +1520,117 @@ mod tests {
             scrollback(&a) < up,
             "wheel down scrolls back toward the live bottom"
         );
+    }
+
+    // --- issue #122: modal scrollback navigation ----------------------------
+
+    #[test]
+    fn scroll_mode_key_without_session_is_noop_and_stays_scroll() {
+        let mut a = app();
+        a.focus = Focus::Agent;
+        a.term_mode = TermMode::Scroll;
+        // No active session: a scroll key must be a modal no-op, never panic, and
+        // never silently forward to the (absent) agent.
+        handle_key(&mut a, key(KeyCode::Char('j')));
+        assert!(!a.should_quit);
+        assert_eq!(a.term_mode, TermMode::Scroll);
+    }
+
+    #[test]
+    fn scroll_mode_esc_returns_to_live() {
+        let mut a = app();
+        a.focus = Focus::Agent;
+        a.term_mode = TermMode::Scroll;
+        handle_key(&mut a, key(KeyCode::Esc));
+        assert_eq!(a.term_mode, TermMode::Live);
+    }
+
+    #[test]
+    fn ctrl_up_in_agent_focus_enters_scroll_mode_only_with_a_session() {
+        let mut a = app();
+        a.focus = Focus::Agent;
+        // No active session: the entry chord is inert (nothing to scroll).
+        handle_key(&mut a, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(a.term_mode, TermMode::Live);
+    }
+
+    /// Pins the SCROLL-mode key wiring against a live session: Ctrl-Up enters
+    /// scroll mode and pages up, k/j move the offset, g/G jump to the ends, and
+    /// Esc snaps back to Live at the bottom.
+    #[test]
+    fn scroll_mode_wires_to_live_session_scrollback() {
+        use portable_pty::CommandBuilder;
+
+        let mut a = app();
+        let name = "wtcc-122-wire-test";
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "seq 1 60"]);
+        a.session_manager
+            .insert_spawned(name, cmd, &std::env::temp_dir(), 5, 20)
+            .unwrap();
+        a.active_session = Some(name.to_string());
+        a.focus = Focus::Agent;
+
+        let scrollback = |a: &App| {
+            a.session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .scrollback()
+        };
+        // Wait until output exceeds the 5-row screen so history exists to scroll into.
+        for _ in 0..40 {
+            let has_history = a
+                .session_manager
+                .get(name)
+                .unwrap()
+                .parser()
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("60");
+            if has_history {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert_eq!(scrollback(&a), 0, "starts at the live bottom");
+        assert_eq!(a.term_mode, TermMode::Live);
+
+        // Ctrl-Up enters scroll mode and pages up once.
+        handle_key(&mut a, KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+        assert_eq!(a.term_mode, TermMode::Scroll);
+        assert!(scrollback(&a) > 0, "entering scroll mode pages up");
+
+        // k (ScrollUp) moves further into history — never back toward the bottom.
+        let before_k = scrollback(&a);
+        handle_key(&mut a, key(KeyCode::Char('k')));
+        assert!(scrollback(&a) >= before_k, "k does not decrease the offset");
+
+        // j (ScrollDown) moves back toward the live bottom.
+        let before_j = scrollback(&a);
+        handle_key(&mut a, key(KeyCode::Char('j')));
+        assert!(scrollback(&a) <= before_j, "j does not increase the offset");
+
+        // g (ScrollTop) jumps to the maximum scrollback offset.
+        handle_key(&mut a, key(KeyCode::Char('g')));
+        let max = a.session_manager.get(name).unwrap().scrollback_view().1;
+        assert_eq!(scrollback(&a), max, "g jumps to the top of history");
+
+        // G (ScrollBottom) snaps to the live bottom but stays in scroll mode.
+        handle_key(&mut a, key(KeyCode::Char('G')));
+        assert_eq!(scrollback(&a), 0, "G snaps to the live bottom");
+        assert_eq!(a.term_mode, TermMode::Scroll, "G stays in scroll mode");
+
+        // Esc leaves scroll mode and returns to the live bottom.
+        handle_key(&mut a, key(KeyCode::Esc));
+        assert_eq!(a.term_mode, TermMode::Live);
+        assert_eq!(scrollback(&a), 0);
     }
 
     #[test]

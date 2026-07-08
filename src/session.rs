@@ -194,6 +194,18 @@ pub fn activity_from_idle(idle: Option<Duration>) -> ActivityState {
     }
 }
 
+/// Probes a vt100 screen for its scrollback bounds `(cur, max)`, restoring the
+/// original offset before returning (#122). Pure over the passed screen so it is
+/// unit-testable against a hand-fed `Parser` without a PTY: `set_scrollback(usize::MAX)`
+/// clamps to the oldest retained line, exposing the max offset.
+pub(crate) fn scrollback_bounds(screen: &mut vt100::Screen) -> (usize, usize) {
+    let cur = screen.scrollback();
+    screen.set_scrollback(usize::MAX);
+    let max = screen.scrollback();
+    screen.set_scrollback(cur);
+    (cur, max)
+}
+
 /// How long a session must stay quiet before it counts as needing attention.
 /// The same fixed threshold for every session — intentionally not configurable.
 pub const ATTENTION_QUIET: Duration = Duration::from_secs(10);
@@ -389,6 +401,27 @@ impl Session {
     /// Snaps the view back to the live bottom (offset 0).
     pub fn scroll_to_bottom(&self) {
         self.parser.lock().unwrap().screen_mut().set_scrollback(0);
+    }
+
+    /// Rows on the visible screen — the page size for keyboard scroll paging (#122).
+    pub fn view_rows(&self) -> usize {
+        self.parser.lock().unwrap().screen().size().0 as usize
+    }
+
+    /// Scrolls the view to the oldest retained line (#122). `usize::MAX` is
+    /// clamped to the scrollback length by vt100.
+    pub fn scroll_to_top(&self) {
+        self.parser
+            .lock()
+            .unwrap()
+            .screen_mut()
+            .set_scrollback(usize::MAX);
+    }
+
+    /// The current and maximum scrollback offsets `(cur, max)` under one lock,
+    /// feeding the SCROLL-mode pane title `[cur/max]` indicator (#122).
+    pub fn scrollback_view(&self) -> (usize, usize) {
+        scrollback_bounds(self.parser.lock().unwrap().screen_mut())
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> anyhow::Result<()> {
@@ -679,6 +712,38 @@ mod tests {
         assert!(
             visible(&session).contains("60"),
             "latest line is visible again"
+        );
+    }
+
+    // --- issue #122: scrollback bounds probe --------------------------------
+    //
+    // `scrollback_bounds` is pure over a vt100 screen, so it is unit-testable by
+    // feeding a hand-built parser more lines than its screen holds — no PTY.
+    #[test]
+    fn scrollback_bounds_reports_max_and_restores_offset() {
+        let mut parser = Parser::new(24, 80, SCROLLBACK_LINES);
+        // 50 lines into a 24-row screen leaves ~26 lines in scrollback.
+        for i in 0..50 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        let (cur, max) = scrollback_bounds(parser.screen_mut());
+        assert_eq!(cur, 0, "starts at the live bottom");
+        assert!(max > 0, "history exists once output exceeds the screen");
+        assert_eq!(
+            parser.screen().scrollback(),
+            0,
+            "the probe restores the original offset"
+        );
+
+        // From a non-zero offset the probe still reports the same max and restores.
+        parser.screen_mut().set_scrollback(5);
+        let (cur, max2) = scrollback_bounds(parser.screen_mut());
+        assert_eq!(cur, 5, "reads the current offset");
+        assert_eq!(max2, max, "max is independent of the starting offset");
+        assert_eq!(
+            parser.screen().scrollback(),
+            5,
+            "the probe restores the non-zero offset it found"
         );
     }
 

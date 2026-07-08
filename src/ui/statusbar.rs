@@ -4,17 +4,22 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, TermMode};
 
 const SIDEBAR_HINTS: &str =
     "j/k move  Tab agent  n/d worktree  a/D repo  R restart  r refresh  : palette  ? help  q quit";
-const AGENT_HINTS: &str = "keys go to the agent  Ctrl-O back to sidebar  Ctrl-Q quit";
+const AGENT_HINTS: &str =
+    "keys go to the agent  Ctrl-↑ scroll  Ctrl-O back to sidebar  Ctrl-Q quit";
+const SCROLL_HINTS: &str = "j/k line  Ctrl-u/d page  g/G top/bottom  Esc live";
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
     let theme = app.theme;
     let attention = app.attention_count();
     let line = match &app.status {
         Some(status) => Line::styled(status.clone(), Style::default().fg(theme.status)),
+        None if app.term_mode == TermMode::Scroll => {
+            Line::styled(SCROLL_HINTS, Style::default().fg(theme.hint))
+        }
         None if attention > 0 => Line::styled(
             format!("{attention} agent(s) need input — press g to jump"),
             Style::default().fg(theme.attention),
@@ -34,7 +39,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::keymap::{self, PRIMARY};
+    use crate::keymap::{self, PRIMARY, SCROLL};
 
     /// Maps a status-line key token (`"j"`, `"Tab"`, `"Ctrl-P"`) back to the
     /// `KeyEvent` it advertises.
@@ -66,6 +71,45 @@ mod tests {
                 assert!(
                     keymap::dispatch(PRIMARY, ev).is_some(),
                     "sidebar hint token {token:?} has no PRIMARY binding"
+                );
+            }
+        }
+    }
+
+    /// Expands one hint key group into the chords it advertises. A leading
+    /// `Ctrl-` applies CONTROL to every slash-separated letter in the group, so
+    /// `"Ctrl-u/d"` yields Ctrl-u and Ctrl-d.
+    fn group_to_keys(keys: &str) -> Vec<KeyEvent> {
+        let (ctrl, body) = match keys.strip_prefix("Ctrl-") {
+            Some(rest) => (true, rest),
+            None => (false, keys),
+        };
+        let mods = if ctrl {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::NONE
+        };
+        body.split('/')
+            .map(|t| match t {
+                "Esc" => KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                _ => KeyEvent::new(KeyCode::Char(t.chars().next().unwrap()), mods),
+            })
+            .collect()
+    }
+
+    /// Anti-drift (#122): every key token teased in the scroll-mode status line
+    /// must map to a real SCROLL binding, so the hint can never advertise a dead
+    /// key after a keymap change.
+    #[test]
+    fn every_scroll_hint_token_maps_to_a_scroll_binding() {
+        for segment in super::SCROLL_HINTS.split("  ") {
+            let Some(keys) = segment.split_whitespace().next() else {
+                continue;
+            };
+            for ev in group_to_keys(keys) {
+                assert!(
+                    keymap::dispatch(SCROLL, ev).is_some(),
+                    "scroll hint token in {keys:?} has no SCROLL binding"
                 );
             }
         }
