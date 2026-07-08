@@ -17,6 +17,16 @@ pub enum Focus {
     Agent,
 }
 
+/// Whether the agent pane forwards keys to the PTY (`Live`) or is in an explicit
+/// modal scrollback-navigation mode (`Scroll`) where keys drive the vt100 view
+/// instead of the agent (#122). Only ever entered from `Focus::Agent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TermMode {
+    #[default]
+    Live,
+    Scroll,
+}
+
 /// An in-progress or completed drag-selection over the agent surface. Both points
 /// are `(grid_row, grid_col)` cells in the terminal surface (0-based, honoring
 /// scrollback via the visible grid). `anchor` is where the drag began; `cursor`
@@ -198,6 +208,9 @@ pub struct App {
     pub should_quit: bool,
     pub session_manager: SessionManager,
     pub active_session: Option<String>,
+    /// Whether the agent pane forwards keys live to the PTY or is in modal
+    /// scrollback navigation (#122). Reset to `Live` whenever focus toggles.
+    pub term_mode: TermMode,
     /// Per-worktree tab layouts (issue #48), keyed by branch slug. In-memory only
     /// (KNOWN GAP: not persisted, so shell tabs are lost on restart; the agent tab
     /// persists via its named tmux session). Lazily created on first use.
@@ -300,6 +313,7 @@ impl App {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            term_mode: TermMode::Live,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -882,6 +896,46 @@ impl App {
             Focus::Sidebar => Focus::Agent,
             Focus::Agent => Focus::Sidebar,
         };
+        // Leaving scroll mode on a focus change must drop back to Live and snap the
+        // view to the live bottom (#122). When NOT in scroll mode, preserve any
+        // mouse-wheel scrollback offset (#106) — do not snap.
+        if self.term_mode == TermMode::Scroll {
+            self.term_mode = TermMode::Live;
+            if let Some(name) = self.active_session.clone()
+                && let Some(session) = self.session_manager.get(&name)
+            {
+                session.scroll_to_bottom();
+            }
+        }
+    }
+
+    /// Enters modal scrollback navigation for the active agent (#122). A no-op
+    /// (stays `Live`) when no session is active — there is nothing to scroll.
+    /// Otherwise flips to `Scroll` and pages up once so the first history is
+    /// immediately visible.
+    pub fn enter_scroll_mode(&mut self) {
+        if self.active_session.is_none() {
+            return;
+        }
+        self.term_mode = TermMode::Scroll;
+        self.status = None;
+        if let Some(name) = self.active_session.clone()
+            && let Some(session) = self.session_manager.get(&name)
+        {
+            let page = session.view_rows().max(1);
+            session.scroll_up(page);
+        }
+    }
+
+    /// Leaves scrollback navigation (#122): returns to `Live` and snaps the
+    /// active session's view back to the live bottom.
+    pub fn exit_scroll_mode(&mut self) {
+        self.term_mode = TermMode::Live;
+        if let Some(name) = self.active_session.clone()
+            && let Some(session) = self.session_manager.get(&name)
+        {
+            session.scroll_to_bottom();
+        }
     }
 
     /// Cycle to the next registered repo (used by the palette "Switch repo").
@@ -1519,6 +1573,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            term_mode: TermMode::Live,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -1794,6 +1849,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            term_mode: TermMode::Live,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: Some(config_path),
@@ -2139,6 +2195,7 @@ mod tests {
             should_quit: false,
             session_manager: SessionManager::new(),
             active_session: None,
+            term_mode: TermMode::Live,
             layouts: HashMap::new(),
             attention: AttentionTracker::default(),
             config_path: None,
@@ -3463,5 +3520,41 @@ mod tests {
             app.status
         );
         assert!(wt.exists(), "a dirty worktree must not be deleted");
+    }
+
+    // --- issue #122: modal scrollback navigation ----------------------------
+
+    #[test]
+    fn term_mode_defaults_to_live() {
+        let app = App::new(Config::default());
+        assert_eq!(app.term_mode, TermMode::Live);
+    }
+
+    #[test]
+    fn enter_scroll_mode_without_active_session_stays_live() {
+        let mut app = App::new(Config::default());
+        assert!(app.active_session.is_none());
+        app.enter_scroll_mode();
+        assert_eq!(
+            app.term_mode,
+            TermMode::Live,
+            "nothing to scroll with no active session"
+        );
+    }
+
+    #[test]
+    fn exit_scroll_mode_returns_to_live() {
+        let mut app = App::new(Config::default());
+        app.term_mode = TermMode::Scroll;
+        app.exit_scroll_mode();
+        assert_eq!(app.term_mode, TermMode::Live);
+    }
+
+    #[test]
+    fn toggle_focus_resets_scroll_mode_to_live() {
+        let mut app = App::new(Config::default());
+        app.term_mode = TermMode::Scroll;
+        app.toggle_focus();
+        assert_eq!(app.term_mode, TermMode::Live);
     }
 }

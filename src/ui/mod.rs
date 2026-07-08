@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget, Wrap};
 use tui_term::widget::{Cursor, PseudoTerminal};
 
-use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection};
+use crate::app::{App, Confirm, Focus, Overlay, Prompt, Selection, TermMode};
 
 const AGENT_PLACEHOLDER: &str = "No worktree selected — press a to register a repository";
 pub(crate) const SIDEBAR_WIDTH: u16 = 34;
@@ -63,8 +63,22 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
 }
 
 fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
+    // Fetch the session up front: in scroll mode the pane title carries a live
+    // `[cur/max]` scrollback indicator probed from it (#122).
+    let session = app
+        .active_session
+        .as_deref()
+        .and_then(|n| app.session_manager.get(n));
+    let scroll = app.term_mode == TermMode::Scroll && app.focus == Focus::Agent;
+    let scroll_view = scroll
+        .then_some(session)
+        .flatten()
+        .map(|s| s.scrollback_view());
     let title = match app.current_worktree() {
-        Some(wt) if !wt.branch.is_empty() => format!(" agent · {} ", wt.branch),
+        Some(wt) if !wt.branch.is_empty() => match scroll_view {
+            Some((cur, max)) => format!(" agent · {} — SCROLL [{cur}/{max}] ", wt.branch),
+            None => format!(" agent · {} ", wt.branch),
+        },
         _ => " agent ".to_string(),
     };
     let block = Block::default()
@@ -88,10 +102,6 @@ fn render_agent(app: &App, area: Rect, buf: &mut Buffer) {
         .and_then(|s| app.layouts.get(&s).cloned());
     render_tab_strip(app, layout.as_ref(), strip_area, buf);
 
-    let session = app
-        .active_session
-        .as_deref()
-        .and_then(|n| app.session_manager.get(n));
     match session {
         Some(s) => {
             let parser = s.parser().lock().unwrap();

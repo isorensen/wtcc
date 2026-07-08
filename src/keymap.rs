@@ -41,13 +41,23 @@ pub enum Action {
     CloseTab,
     NextTab,
     PrevTab,
+    // Scrollback navigation (#122). All pure modal/navigation actions —
+    // `in_palette` is false for every one, so they are reachable only by key.
+    ScrollMode,
+    ScrollUp,
+    ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollTop,
+    ScrollBottom,
+    ScrollExit,
     Quit,
 }
 
 impl Action {
     /// Every action, in palette declaration order. Palette ordering for the
     /// commands matches this list (filtered by [`Action::in_palette`]).
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 37] = [
         Action::Next,
         Action::Prev,
         Action::ToggleFocus,
@@ -76,6 +86,14 @@ impl Action {
         Action::CloseTab,
         Action::NextTab,
         Action::PrevTab,
+        Action::ScrollMode,
+        Action::ScrollUp,
+        Action::ScrollDown,
+        Action::ScrollPageUp,
+        Action::ScrollPageDown,
+        Action::ScrollTop,
+        Action::ScrollBottom,
+        Action::ScrollExit,
         Action::Quit,
     ];
 
@@ -112,6 +130,14 @@ impl Action {
             Action::CloseTab => "Close tab",
             Action::NextTab => "Next tab",
             Action::PrevTab => "Previous tab",
+            Action::ScrollMode => "scroll mode",
+            Action::ScrollUp => "scroll up",
+            Action::ScrollDown => "scroll down",
+            Action::ScrollPageUp => "page up",
+            Action::ScrollPageDown => "page down",
+            Action::ScrollTop => "scroll to top",
+            Action::ScrollBottom => "scroll to bottom",
+            Action::ScrollExit => "exit scroll",
             Action::Quit => "Quit",
         }
     }
@@ -334,9 +360,63 @@ pub static AGENT: &[Binding] = &[
         chords: &[Chord::ctrl('o')],
         action: Action::FocusSidebar,
     },
+    // Enter modal scrollback navigation (#122). Two ergonomic entry chords that a
+    // full-screen agent never needs: Ctrl-↑ and Shift-PageUp. `Chord::matches`
+    // exact-matches modifiers for these non-Char keys.
+    Binding {
+        chords: &[
+            Chord {
+                code: KeyCode::Up,
+                mods: KeyModifiers::CONTROL,
+            },
+            Chord {
+                code: KeyCode::PageUp,
+                mods: KeyModifiers::SHIFT,
+            },
+        ],
+        action: Action::ScrollMode,
+    },
     Binding {
         chords: &[Chord::ctrl('q')],
         action: Action::Quit,
+    },
+];
+
+/// Scroll-mode keymap (#122). Active only while the agent pane is in
+/// [`crate::app::TermMode::Scroll`]; every key here drives the vt100 scrollback
+/// view instead of the agent, and any unbound key is a modal no-op.
+pub static SCROLL: &[Binding] = &[
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('k')), Chord::key(KeyCode::Up)],
+        action: Action::ScrollUp,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('j')), Chord::key(KeyCode::Down)],
+        action: Action::ScrollDown,
+    },
+    Binding {
+        chords: &[Chord::ctrl('u'), Chord::key(KeyCode::PageUp)],
+        action: Action::ScrollPageUp,
+    },
+    Binding {
+        chords: &[Chord::ctrl('d'), Chord::key(KeyCode::PageDown)],
+        action: Action::ScrollPageDown,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('g')), Chord::key(KeyCode::Home)],
+        action: Action::ScrollTop,
+    },
+    Binding {
+        chords: &[Chord::key(KeyCode::Char('G')), Chord::key(KeyCode::End)],
+        action: Action::ScrollBottom,
+    },
+    Binding {
+        chords: &[
+            Chord::key(KeyCode::Esc),
+            Chord::key(KeyCode::Char('q')),
+            Chord::ctrl('c'),
+        ],
+        action: Action::ScrollExit,
     },
 ];
 
@@ -432,6 +512,84 @@ mod tests {
             dispatch(PRIMARY, ev(KeyCode::Char('s'), KeyModifiers::NONE)),
             Some(Action::RunScript)
         );
+    }
+
+    // --- issue #122: scrollback keyboard navigation -------------------------
+
+    #[test]
+    fn agent_entry_chords_open_scroll_mode() {
+        assert_eq!(
+            dispatch(AGENT, ev(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(Action::ScrollMode),
+            "Ctrl-↑ enters scroll mode"
+        );
+        assert_eq!(
+            dispatch(AGENT, ev(KeyCode::PageUp, KeyModifiers::SHIFT)),
+            Some(Action::ScrollMode),
+            "Shift-PageUp enters scroll mode"
+        );
+    }
+
+    #[test]
+    fn scroll_bindings_each_resolve() {
+        for (code, mods, action) in [
+            (KeyCode::Char('k'), KeyModifiers::NONE, Action::ScrollUp),
+            (KeyCode::Up, KeyModifiers::NONE, Action::ScrollUp),
+            (KeyCode::Char('j'), KeyModifiers::NONE, Action::ScrollDown),
+            (KeyCode::Down, KeyModifiers::NONE, Action::ScrollDown),
+            (
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+                Action::ScrollPageUp,
+            ),
+            (KeyCode::PageUp, KeyModifiers::NONE, Action::ScrollPageUp),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                Action::ScrollPageDown,
+            ),
+            (
+                KeyCode::PageDown,
+                KeyModifiers::NONE,
+                Action::ScrollPageDown,
+            ),
+            (KeyCode::Char('g'), KeyModifiers::NONE, Action::ScrollTop),
+            (KeyCode::Home, KeyModifiers::NONE, Action::ScrollTop),
+            (KeyCode::Char('G'), KeyModifiers::NONE, Action::ScrollBottom),
+            (KeyCode::End, KeyModifiers::NONE, Action::ScrollBottom),
+            (KeyCode::Esc, KeyModifiers::NONE, Action::ScrollExit),
+            (KeyCode::Char('q'), KeyModifiers::NONE, Action::ScrollExit),
+            (
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                Action::ScrollExit,
+            ),
+        ] {
+            assert_eq!(
+                dispatch(SCROLL, ev(code, mods)),
+                Some(action),
+                "{code:?}+{mods:?} must resolve to {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_actions_are_never_offered_in_the_palette() {
+        for action in [
+            Action::ScrollMode,
+            Action::ScrollUp,
+            Action::ScrollDown,
+            Action::ScrollPageUp,
+            Action::ScrollPageDown,
+            Action::ScrollTop,
+            Action::ScrollBottom,
+            Action::ScrollExit,
+        ] {
+            assert!(
+                !action.in_palette(),
+                "{action:?} must stay out of the palette"
+            );
+        }
     }
 
     #[test]

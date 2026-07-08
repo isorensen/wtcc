@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Keyboard scrollback navigation in the agent pane**: press `Ctrl-↑` (or `Shift-PageUp`)
+  to enter an explicit modal scroll mode instead of only being able to wheel with the mouse.
+  In scroll mode `j`/`k` move by line, `Ctrl-d`/`Ctrl-u` (or `PageDown`/`PageUp`) by page,
+  `g`/`G` (or `Home`/`End`) jump to the oldest/newest line, and `Esc`/`q`/`Ctrl-C` return to
+  the live agent. The pane title shows a `[cur/max]` position indicator and the status bar
+  shows the scroll-mode keys while active; keys are never stolen from the live agent, and the
+  mouse-wheel scrollback (#106) is unchanged. (#122)
+
 ## [0.9.1] - 2026-07-02
 
 ### Changed
